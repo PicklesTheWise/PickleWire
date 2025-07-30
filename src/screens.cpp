@@ -28,7 +28,7 @@ extern void sendPololuMotorForward(uint16_t speed);
 extern void sendPololuSetCurrentLimit(float selector_A);
 extern uint16_t readG2(uint8_t id);
 extern uint32_t readRCPulse();
-extern float getSmoothedTemperature();
+
 extern void scheduleEepromSave();
 extern void safeSerialPrint(const char* msg);
 extern void safeSerialPrintln(const char* msg);
@@ -944,7 +944,7 @@ void updatePIDTuneStatus() {
 void updateTelemetry() {
     if (!lblVal[0] || !lblVal[1] || !lblVal[2] || !lblVal[3]) return;
     
-    float temp = getSmoothedTemperature();
+    float temp = readMax6675Temp();
     float displayTemp = temp;  // Use raw temperature without offset
     
     // Read actual current from G2 motor controller (variable ID 44)
@@ -1057,7 +1057,7 @@ void updateOverrideScreen() {
     // Update temperature display with exception handling
     try {
         if (lblOverrideTemp) {
-            float temp = getSmoothedTemperature();
+            float temp = readMax6675Temp();
             char buf[32];
             sprintf(buf, "%.1f C", temp);
             lv_label_set_text(lblOverrideTemp, buf);

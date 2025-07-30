@@ -9,6 +9,7 @@
 #include <EEPROM.h>
 #include <PID_v1.h>  // Add PID library
 #include "driver/gpio.h"  // For GPIO pullup/pulldown control
+#include "driver/spi_master.h"
 #include "screens.h"  // Include screen functions
 
 // Pololu & LVGL
@@ -23,17 +24,18 @@
 #define RC_INPUT_PIN          15
 
 // Touch controller pins
+
 #define TP_SDA_PIN             1
 #define TP_SCL_PIN             3
 #define TP_RST_PIN             2
 #define TP_INT_PIN             4
 
-// Temperature sensor pin - AD8495 K-Type Thermocouple Amplifier
-#define TEMP_SENSOR_PIN       18        // GPIO18 for AD8495 output
-#define AD8495_OFFSET_V       0      // 1.25V offset at 0°C
-#define AD8495_SCALE_MV       5.0       // 5mV per °C
-#define AD8495_VREF           3.3       // ESP32 ADC reference voltage
-#define ADC_RESOLUTION        4095.0    // 12-bit ADC (0-4095)
+// MAX6675 SPI3 pin assignments
+#define MAX6675_SPI_HOST SPI3_HOST
+#define MAX6675_PIN_CS   18    // CS pin (user assigned)
+#define MAX6675_PIN_CLK  43    // SCK pin (user assigned)
+#define MAX6675_PIN_SO   44    // SO pin (user assigned)
+
 
 // EEPROM layout
 #define ADDR_WIRE_DIAM         0   // float
@@ -137,11 +139,7 @@ static lv_color_t              buf1[LVGL_BUF_SIZE];
 static lv_color_t              buf2[LVGL_BUF_SIZE];  // Added second buffer for LVGL double buffering
 
 // Temperature smoothing
-#define TEMP_BUFFER_SIZE 5        // Reduce buffer size for faster response (was 10)
-float temperatureBuffer[TEMP_BUFFER_SIZE] = {0};
-int tempBufferIndex = 0;
-uint32_t lastTempReadTime = 0;
-float smoothedTemp = 0.0f;
+
 
 // Forward declarations
 uint16_t readG2(uint8_t id);
@@ -151,8 +149,8 @@ void sendPololuStart();
 void sendPololuHotWireForward(uint16_t power);
 void sendPololuSetCurrentLimit(float selector_A);
 uint16_t readPololuOffsetCalibration();
-float readThermistorTemp();
-float getSmoothedTemperature();
+void debugPrintG2Voltage();
+
 void eepromLoad();
 void eepromSave();
 void buildTelemetryScreen();
@@ -257,173 +255,65 @@ int screensaverX = 0, screensaverY = 0;  // Current position
 int screensaverVelX = 2, screensaverVelY = 1;  // Velocity for bouncing
 lv_obj_t *savedActiveScreen = nullptr;  // Screen to return to after screensaver
 
-// Function to read temperature from AD8495 K-Type Thermocouple Amplifier
-float readThermistorTemp() {
-  const int numSamples = 10;  // Increased samples for stability
-  float sum = 0;
-  int validSamples = 0;
-  
-  // Take multiple samples and check for stability
-  for (int i = 0; i < numSamples; i++) {
-    int rawADC = analogRead(TEMP_SENSOR_PIN);
-    if (rawADC > 0 && rawADC < 4095) {  // Valid ADC range
-      sum += rawADC;
-      validSamples++;
+// SPI configuration for MAX6675
+
+
+
+spi_device_handle_t max6675_spi;
+
+// Read temperature from MAX6675 SPI thermocouple
+float readMax6675Temp() {
+    safeSerialPrintln("MAX6675 SPI: Starting temperature read...");
+    safeSerialPrintf("MAX6675 SPI: Device handle: %p\n", max6675_spi);
+    uint8_t rx_buf[2] = {0};
+    spi_transaction_t t = {};
+    t.length = 16;
+    t.rx_buffer = rx_buf;
+    t.flags = SPI_TRANS_USE_RXDATA;
+    safeSerialPrintf("MAX6675 SPI: Transaction struct: length=%d, rx_buf=%p, flags=0x%X\n", t.length, t.rx_buffer, t.flags);
+    esp_err_t ret = spi_device_transmit(max6675_spi, &t);
+    safeSerialPrintf("MAX6675 SPI: spi_device_transmit() returned: %d\n", ret);
+    if (ret != ESP_OK) {
+        safeSerialPrintln("ERROR: MAX6675 SPI transmit failed!");
+        return NAN;
     }
-    delay(5);  // Longer delay for AD8495 settling
-  }
-  
-  if (validSamples == 0) {
-    safeSerialPrintln("ERROR: No valid ADC readings from thermocouple!");
-    return NAN;
-  }
-  
-  float average = sum / validSamples;
-  
-  // Convert ADC reading to voltage
-  float voltage = (average / ADC_RESOLUTION) * AD8495_VREF;
-  
-  // AD8495 specific checks
-  if (voltage < 0.1) {
-    safeSerialPrintf("ERROR: AD8495 voltage too low (%.3fV) - check power/connections\n", voltage);
-    return NAN;
-  }
-  
-  // Check for disconnected thermocouple (normal condition when no sensor connected)
-  if (voltage > 3.25) {
-    // This is normal behavior when thermocouple is disconnected
-    static uint32_t lastDisconnectedLog = 0;
-    uint32_t now = millis();
-    if (now - lastDisconnectedLog > 10000) {  // Log every 10 seconds, not constantly
-      lastDisconnectedLog = now;
-      safeSerialPrintf("INFO: AD8495 reading %.3fV - thermocouple disconnected (normal when no sensor connected)\n", voltage);
+    safeSerialPrintf("MAX6675 SPI: RX bytes: 0x%02X 0x%02X\n", rx_buf[0], rx_buf[1]);
+    uint16_t value = (rx_buf[0] << 8) | rx_buf[1];
+    safeSerialPrintf("MAX6675 SPI: Raw value: 0x%04X\n", value);
+    if (value & 0x4) {
+        safeSerialPrintln("MAX6675: No thermocouple connected!");
+        return NAN;
     }
-    return NAN;  // Return NaN but don't treat as error
-  }
-  
-  // Convert voltage to temperature using AD8495 formula
-  // V_out = (T × 5mV) + 1.25V
-  // T = (V_out - 1.25V) / 5mV
-  float temperature = (voltage - AD8495_OFFSET_V) / (AD8495_SCALE_MV / 1000.0);
-  
-  // Detailed debug output every 5 seconds (more frequent for troubleshooting)
-  static uint32_t lastDebugOutput = 0;
-  uint32_t now = millis();
-  if (now - lastDebugOutput > 5000) {
-    lastDebugOutput = now;
-    
-    safeSerialPrintf("AD8495 THERMOCOUPLE DEBUG:\n");
-    safeSerialPrintf("  Valid samples: %d/%d\n", validSamples, numSamples);
-    safeSerialPrintf("  ADC Raw=%.1f (0-4095 range)\n", average);
-    safeSerialPrintf("  Voltage=%.3fV (AD8495 output)\n", voltage);
-    safeSerialPrintf("  Temperature=%.1f°C (K-type thermocouple)\n", temperature);
-    safeSerialPrintf("  Expected voltage at 25°C: %.3fV\n", (25.0 * AD8495_SCALE_MV / 1000.0) + AD8495_OFFSET_V);
-    
-    // Additional diagnostics
-    if (voltage < 1.20) {
-      safeSerialPrintln("  STATUS: ⚠️  Very low voltage detected!");
-      safeSerialPrintf("  Raw ADC: %.1f (should be ~1900 for room temp)\n", average);
-      safeSerialPrintf("  Calculated voltage: %.3fV (should be ~1.375V for 25°C)\n", voltage);
-      safeSerialPrintln("  POSSIBLE CAUSES:");
-      safeSerialPrintln("    1. AD8495 power supply issue (check 3.3V or 5V supply)");
-      safeSerialPrintln("    2. Cold junction compensation problem");
-      safeSerialPrintln("    3. Wrong thermocouple type (ensure K-type)");
-      safeSerialPrintln("    4. Damaged AD8495 or thermocouple");
-      safeSerialPrintln("    5. Poor connections to AD8495 T+ and T- terminals");
-    } else if (voltage > 1.30 && voltage < 1.35) {
-      safeSerialPrintln("  STATUS: Normal room temperature range");
-    } else if (voltage > 2.0 && voltage < 3.25) {
-      safeSerialPrintln("  STATUS: High temperature detected");
-    } else if (voltage >= 3.25) {
-      safeSerialPrintln("  STATUS: ✓ Thermocouple disconnected (AD8495 pulled to VCC)");
-      safeSerialPrintln("  This is normal behavior when no thermocouple is connected.");
-      safeSerialPrintln("  To connect a thermocouple:");
-      safeSerialPrintln("    1. Connect K-type thermocouple to AD8495 T+ and T- terminals");
-      safeSerialPrintln("    2. Ensure good electrical connections");
-      safeSerialPrintln("    3. Voltage should drop to ~1.375V at room temperature");
-    }
-  }
-  
-  // Validate temperature range for K-type thermocouple with AD8495
-  if (isnan(temperature)) {
-    safeSerialPrintln("WARNING: Temperature calculation resulted in NaN");
-    return NAN;
-  }
-  
-  // More realistic K-type thermocouple range with AD8495
-  if (temperature < -270.0) {
-    safeSerialPrintf("WARNING: Temperature extremely low (%.1f°C) - possible AD8495 power issue\n", temperature);
-  }
-  
-  if (temperature > 1000.0) {
-    safeSerialPrintf("WARNING: Temperature very high (%.1f°C) - check for short circuit\n", temperature);
-  }
-  
-  return temperature;
+    float tempC = ((value >> 3) & 0xFFF) * 0.25f;
+    safeSerialPrintf("MAX6675 SPI: Decoded temperature: %.2f°C\n", tempC);
+    return tempC;
 }
 
-// Smoothed temperature readings
-float getSmoothedTemperature() {
-  uint32_t currentTime = millis();
-  
-  // Only update temperature every 500ms
-  if (currentTime - lastTempReadTime >= 500) {
-    lastTempReadTime = currentTime;
-    
-    // Read the current temperature
-    float newTemp = readThermistorTemp();
-    
-    // Only add valid temperature readings to buffer (expanded range for troubleshooting)
-    if (!isnan(newTemp) && newTemp >= -270.0 && newTemp <= 1000.0) {
-      temperatureBuffer[tempBufferIndex] = newTemp;
-      tempBufferIndex = (tempBufferIndex + 1) % TEMP_BUFFER_SIZE;
-    } else {
-      // Log invalid readings for debugging
-      static uint32_t lastInvalidLog = 0;
-      if (currentTime - lastInvalidLog > 2000) {  // Log every 2 seconds
-        lastInvalidLog = currentTime;
-        if (isnan(newTemp)) {
-          safeSerialPrintln("TEMP: Skipping NaN temperature reading");
-        } else {
-          safeSerialPrintf("TEMP: Skipping out-of-range reading: %.1f°C\n", newTemp);
-        }
-      }
-    }
-    
-    // Calculate the average of all valid values in the buffer
-    float sum = 0;
-    int validValues = 0;
-    
-    for (int i = 0; i < TEMP_BUFFER_SIZE; i++) {
-      if (!isnan(temperatureBuffer[i]) && 
-          temperatureBuffer[i] >= -270.0 && temperatureBuffer[i] <= 1000.0) {
-        sum += temperatureBuffer[i];
-        validValues++;
-      }
-    }
-    
-    // Update the smoothed temperature value
-    if (validValues > 0) {
-      float newSmoothedTemp = sum / validValues;
-      
-      // Check for dramatic temperature changes (possible sensor issues)
-      if (validValues > 1 && abs(newSmoothedTemp - smoothedTemp) > 50.0) {
-        safeSerialPrintf("TEMP: Large temperature change detected: %.1f°C -> %.1f°C\n", 
-                         smoothedTemp, newSmoothedTemp);
-      }
-      
-      smoothedTemp = newSmoothedTemp;
-    } else {
-      // No valid readings in buffer - keep last known value or use safe fallback
-      if (smoothedTemp == 0.0) {
-        smoothedTemp = 25.0;  // Room temperature fallback
-        safeSerialPrintln("TEMP: No valid readings - using room temperature fallback (25°C)");
-      }
-    }
-  }
-  
-  return smoothedTemp;
+void max6675_init() {
+    safeSerialPrintln("MAX6675 SPI: Initializing SPI bus...");
+    spi_bus_config_t buscfg = {};
+    buscfg.mosi_io_num = -1;
+    buscfg.miso_io_num = MAX6675_PIN_SO;
+    buscfg.sclk_io_num = MAX6675_PIN_CLK;
+    buscfg.quadwp_io_num = -1;
+    buscfg.quadhd_io_num = -1;
+    buscfg.max_transfer_sz = 2;
+    safeSerialPrintf("MAX6675 SPI: buscfg: miso=%d, sclk=%d, mosi=%d\n", buscfg.miso_io_num, buscfg.sclk_io_num, buscfg.mosi_io_num);
+    esp_err_t bus_ret = spi_bus_initialize(MAX6675_SPI_HOST, &buscfg, SPI_DMA_CH_AUTO);
+    safeSerialPrintf("MAX6675 SPI: spi_bus_initialize() returned: %d\n", bus_ret);
+
+    safeSerialPrintln("MAX6675 SPI: Adding SPI device...");
+    spi_device_interface_config_t devcfg = {};
+    devcfg.clock_speed_hz = 1000000; // 1 MHz
+    devcfg.mode = 0;
+    devcfg.spics_io_num = MAX6675_PIN_CS;
+    devcfg.queue_size = 1;
+    devcfg.flags = SPI_DEVICE_NO_DUMMY;
+    safeSerialPrintf("MAX6675 SPI: devcfg: cs=%d, clock=%d, mode=%d\n", devcfg.spics_io_num, devcfg.clock_speed_hz, devcfg.mode);
+    esp_err_t dev_ret = spi_bus_add_device(MAX6675_SPI_HOST, &devcfg, &max6675_spi);
+    safeSerialPrintf("MAX6675 SPI: spi_bus_add_device() returned: %d, handle=%p\n", dev_ret, max6675_spi);
 }
+
 
 //------------------------------------------------------------------------------
 // Safety Monitoring System
@@ -563,21 +453,15 @@ void lvgl_touch_read(lv_indev_drv_t*, lv_indev_data_t* data){
 // Safe Serial Functions
 
 inline void safeSerialPrint(const char* msg) {
-  if (Serial) {
-    Serial.print(msg);
-  }
+  Serial.print(msg);
 }
 
 inline void safeSerialPrintln(const char* msg) {
-  if (Serial) {
-    Serial.println(msg);
-  }
+  Serial.println(msg);
 }
 
 // For formatted output
 void safeSerialPrintf(const char* format, ...) {
-  if (!Serial) return;
-  
   char buf[128];
   va_list args;
   va_start(args, format);
@@ -674,6 +558,18 @@ void setup(){
   pinMode(5, OUTPUT); 
   digitalWrite(5, HIGH);
   Serial.println("Display power enabled");
+
+  // Explicitly set MAX6675 CS pin as OUTPUT (no pullup/pulldown)
+  Serial.println("Setting up MAX6675 CS pin...");
+  pinMode(MAX6675_PIN_CS, OUTPUT);
+  digitalWrite(MAX6675_PIN_CS, HIGH); // Default CS inactive
+  Serial.println("MAX6675 CS pin set as OUTPUT and HIGH");
+
+  // Explicitly set MAX6675 SPI pins
+  Serial.println("Setting up MAX6675 SCK and SO pins...");
+  pinMode(MAX6675_PIN_CLK, OUTPUT);      // SCK: output
+  pinMode(MAX6675_PIN_SO, INPUT);        // SO/MISO: input
+  Serial.println("MAX6675 SCK set as OUTPUT, SO set as INPUT");
   
   // Initialize display with error handling
   Serial.println("Initializing display...");
@@ -685,6 +581,7 @@ void setup(){
   lcd.setRotation(1);
   Serial.println("Display initialized");
   
+
   // Initialize touch controller
   Serial.println("Initializing touch...");
   touchWire.begin(TP_SDA_PIN, TP_SCL_PIN, 400000);
@@ -692,84 +589,11 @@ void setup(){
   touch.setRotation(1);
   Serial.println("Touch initialized");
 
-  // Configure ADC for temperature measurement
-  Serial.println("Configuring ADC...");
-  pinMode(TEMP_SENSOR_PIN, INPUT);
-  
-  // Explicitly disable internal pullup/pulldown resistors on GPIO18
-  esp_err_t pullup_result = gpio_pullup_dis((gpio_num_t)TEMP_SENSOR_PIN);
-  esp_err_t pulldown_result = gpio_pulldown_dis((gpio_num_t)TEMP_SENSOR_PIN);
-  
-  Serial.printf("GPIO18 pullup disable result: %s\n", (pullup_result == ESP_OK) ? "SUCCESS" : "FAILED");
-  Serial.printf("GPIO18 pulldown disable result: %s\n", (pulldown_result == ESP_OK) ? "SUCCESS" : "FAILED");
-  
-  // ESP32-S3 specific ADC configuration for better accuracy
-  analogReadResolution(12);  // ESP32-S3 has 12-bit ADC
-  analogSetAttenuation(ADC_11db);  // Set 11dB attenuation for 0-3.3V range (good for AD8495)
-  analogSetPinAttenuation(TEMP_SENSOR_PIN, ADC_11db);  // Pin-specific attenuation
-  
-  Serial.println("ADC configured with 12-bit resolution and 11dB attenuation");
-  
-  // Verify ADC channel is working
-  Serial.println("Verifying ADC channel...");
-  bool adcWorking = true;
-  for (int i = 0; i < 3; i++) {
-    int testReading = analogRead(TEMP_SENSOR_PIN);
-    if (testReading == 0 || testReading == 4095) {
-      Serial.printf("WARNING: ADC reading %d is at extreme value (%d)\n", i+1, testReading);
-      adcWorking = false;
-    }
-    delay(10);
-  }
-  
-  if (!adcWorking) {
-    Serial.println("ERROR: ADC may not be functioning correctly!");
-  } else {
-    Serial.println("ADC channel verification passed");
-  }
-  
-  // Test ADC reading immediately after configuration
-  delay(100); // Let GPIO settle
-  int testADC = analogRead(TEMP_SENSOR_PIN);
-  float testVoltage = (testADC / 4095.0) * 3.3;
-  Serial.printf("Immediate GPIO18 ADC test: Raw=%d, Voltage=%.3fV\n", testADC, testVoltage);
-  Serial.printf("Expected for AD8495 at room temp (~25°C): Raw=~1900, Voltage=~1.375V\n");
-  Serial.printf("AD8495 voltage range: 1.25V (0°C) to 3.3V (410°C)\n");
-  
-  // Verify ADC is working by testing multiple readings
-  Serial.println("Taking 5 test readings...");
-  bool constantReading = true;
-  int firstReading = analogRead(TEMP_SENSOR_PIN);
-  
-  for (int i = 0; i < 5; i++) {
-    int rawADC = analogRead(TEMP_SENSOR_PIN);
-    float voltage = (rawADC / 4095.0) * 3.3;
-    float tempC = (voltage - 1.25) / 0.005; // AD8495 formula
-    Serial.printf("  Reading %d: ADC=%d, V=%.3f, Temp=%.1f°C\n", i+1, rawADC, voltage, tempC);
-    
-    // Check if readings are varying (good) or constant (bad)
-    if (abs(rawADC - firstReading) > 10) {
-      constantReading = false;
-    }
-    
-    // Specific check for 3.3V readings (normal when thermocouple disconnected)
-    if (voltage > 3.28 && voltage < 3.32) {
-      Serial.printf("  ✓ Reading %d shows 3.3V - thermocouple disconnected (normal)\n", i+1);
-    }
-    
-    delay(100);
-  }
-  
-  if (constantReading) {
-    Serial.println("  ⚠️  ERROR: All ADC readings are identical - possible hardware issue!");
-    Serial.println("  TROUBLESHOOTING STEPS:");
-    Serial.println("    1. Check thermocouple is properly connected to AD8495");
-    Serial.println("    2. Verify AD8495 power supply connections");
-    Serial.println("    3. Check GPIO18 is not damaged or shorted");
-    Serial.println("    4. Measure AD8495 output voltage with multimeter");
-  } else {
-    Serial.println("  ✓ ADC readings are varying normally");
-  }
+  // Initialize MAX6675 SPI thermocouple
+  Serial.println("Initializing MAX6675 SPI...");
+  max6675_init();
+  Serial.println("MAX6675 SPI initialized");
+
 
   // Configure PID controller
   Serial.println("Configuring PID...");
@@ -859,6 +683,9 @@ void setup(){
 }
 
 void loop(){
+  Serial.print("GPIO5 state: ");
+  Serial.println(digitalRead(5));
+  delay(1000);
   // Full loop with LVGL timer handling and telemetry
   static uint32_t lastTick = 0, lastTele = 0, lastPrint = 0;
   static uint32_t lastWatchdog = 0;
@@ -958,10 +785,9 @@ void loop(){
     // PID control mode - use temperature control
     if (now - lastPidUpdateTime >= PID_UPDATE_INTERVAL) {
       lastPidUpdateTime = now;
-      float currentTemp = getSmoothedTemperature();
-      
+      float currentTemp = readMax6675Temp();
       // Validate temperature reading before using in PID
-      if (!isnan(currentTemp) && currentTemp >= -270.0 && currentTemp <= 1000.0) {
+      if (!isnan(currentTemp) && currentTemp >= 0.0 && currentTemp <= 1024.0) {
         temperatureInput = currentTemp;
         tempPID.Compute();
         hotWireOutput = (uint16_t)outputPWM;
@@ -991,7 +817,7 @@ void loop(){
   }
   
   // Safety monitoring - check if heater is working properly
-  float currentTemp = getSmoothedTemperature();
+  float currentTemp = readMax6675Temp();
   updateSafetyMonitoring(hotWireOutput, currentTemp);
   
   // Apply safety shutdown if error detected
@@ -1070,7 +896,18 @@ uint16_t readG2(uint8_t id){
     Wire.write(0xA1); Wire.write(id);
   Wire.endTransmission();
   Wire.requestFrom((int)G2_ADDRESS, 2);
-  return Wire.read() | (Wire.read()<<8);
+  uint8_t low = Wire.read();
+  uint8_t high = Wire.read();
+  uint16_t value = low | (high << 8);
+  safeSerialPrintf("G2 I2C: Read reg 0x%02X, value: %u (0x%04X)\n", id, value, value);
+  return value;
+}
+
+// Debug: Read and print Pololu G2 input voltage (register 0x24)
+void debugPrintG2Voltage() {
+    uint16_t raw = readG2(0x24); // Register 0x24: Input voltage in millivolts
+    float voltage = raw / 1000.0f;
+    safeSerialPrintf("G2 I2C: Input voltage: %.3f V (raw: %u mV)\n", voltage, raw);
 }
 
 void sendPololuStart(){
@@ -1194,7 +1031,7 @@ void scheduleEepromSave() {
 
 void startPIDAutotune(float setpoint, float outputStep) {
   // Validate current temperature reading before starting autotune
-  float currentTemp = getSmoothedTemperature();
+  float currentTemp = readMax6675Temp();
   if (isnan(currentTemp) || currentTemp < -270.0 || currentTemp > 1000.0) {
     safeSerialPrintf("Cannot start autotune - invalid temperature reading: %.1f°C\n", currentTemp);
     return;
@@ -1210,7 +1047,7 @@ void startPIDAutotune(float setpoint, float outputStep) {
   autotuneDirection = true;
   autotuneLastSwitch = millis();
   autotuneNumPeaks = 0;
-  autotuneLastTemp = getSmoothedTemperature();
+  autotuneLastTemp = readMax6675Temp();
   autotuneTempRising = true;
   autotuneKu = 0.0;
   autotunePu = 0.0;
@@ -1227,7 +1064,7 @@ void updatePIDAutotune() {
   if (!autotuneActive || autotuneState != 1) return;
   
   uint32_t now = millis();
-  float currentTemp = getSmoothedTemperature();
+  float currentTemp = readMax6675Temp();
   
   // Validate temperature reading before using in autotune
   if (isnan(currentTemp) || currentTemp < -270.0 || currentTemp > 1000.0) {

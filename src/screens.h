@@ -1,3 +1,5 @@
+// Allow screens.cpp to access MAX6675 temperature function
+float readMax6675Temp();
 #include <PID_v1.h>
 #include <lvgl.h>
 #include <Arduino.h>  // For String type
