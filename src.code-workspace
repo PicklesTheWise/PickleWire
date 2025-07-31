@@ -1,0 +1,12 @@
+{
+	"folders": [
+		{
+			"path": "../SPI Test/src"
+		},
+		{
+			"name": "SPI Test",
+			"path": "../SPI Test"
+		}
+	],
+	"settings": {}
+}

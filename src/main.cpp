@@ -9,7 +9,7 @@
 #include <EEPROM.h>
 #include <PID_v1.h>  // Add PID library
 #include "driver/gpio.h"  // For GPIO pullup/pulldown control
-#include "driver/spi_master.h"
+#include <HardwareSerial.h>
 #include "screens.h"  // Include screen functions
 
 // Pololu & LVGL
@@ -21,7 +21,8 @@
 // I²C & RC
 #define I2C_SDA_PIN           11
 #define I2C_SCL_PIN           10
-#define RC_INPUT_PIN          15
+// RC input pin
+#define RC_INPUT_PIN          15    // RC input now on GPIO15
 
 // Touch controller pins
 
@@ -30,11 +31,10 @@
 #define TP_RST_PIN             2
 #define TP_INT_PIN             4
 
-// MAX6675 SPI3 pin assignments
-#define MAX6675_SPI_HOST SPI3_HOST
-#define MAX6675_PIN_CS   18    // CS pin (user assigned)
-#define MAX6675_PIN_CLK  43    // SCK pin (user assigned)
-#define MAX6675_PIN_SO   44    // SO pin (user assigned)
+
+// UART pins for Nano communication
+#define NANO_UART_TX 43  // ESP32-S3 TX to Nano RX
+#define NANO_UART_RX 44  // ESP32-S3 RX from Nano TX
 
 
 // EEPROM layout
@@ -259,59 +259,40 @@ lv_obj_t *savedActiveScreen = nullptr;  // Screen to return to after screensaver
 
 
 
-spi_device_handle_t max6675_spi;
+// UART interface to Nano
+HardwareSerial NanoSerial(2);
 
-// Read temperature from MAX6675 SPI thermocouple
-float readMax6675Temp() {
-    safeSerialPrintln("MAX6675 SPI: Starting temperature read...");
-    safeSerialPrintf("MAX6675 SPI: Device handle: %p\n", max6675_spi);
-    uint8_t rx_buf[2] = {0};
-    spi_transaction_t t = {};
-    t.length = 16;
-    t.rx_buffer = rx_buf;
-    t.flags = SPI_TRANS_USE_RXDATA;
-    safeSerialPrintf("MAX6675 SPI: Transaction struct: length=%d, rx_buf=%p, flags=0x%X\n", t.length, t.rx_buffer, t.flags);
-    esp_err_t ret = spi_device_transmit(max6675_spi, &t);
-    safeSerialPrintf("MAX6675 SPI: spi_device_transmit() returned: %d\n", ret);
-    if (ret != ESP_OK) {
-        safeSerialPrintln("ERROR: MAX6675 SPI transmit failed!");
-        return NAN;
+// Read temperature from Nano over UART
+float readNanoTemp() {
+    static String tempLine = "";
+    static float lastTempC = NAN;
+    static uint32_t lastRequestTime = 0;
+    // Non-blocking: send request every call, parse response if available
+    uint32_t now = millis();
+    // Send request every 250ms (or as needed)
+    if (now - lastRequestTime > 250) {
+        NanoSerial.write('R');
+        lastRequestTime = now;
     }
-    safeSerialPrintf("MAX6675 SPI: RX bytes: 0x%02X 0x%02X\n", rx_buf[0], rx_buf[1]);
-    uint16_t value = (rx_buf[0] << 8) | rx_buf[1];
-    safeSerialPrintf("MAX6675 SPI: Raw value: 0x%04X\n", value);
-    if (value & 0x4) {
-        safeSerialPrintln("MAX6675: No thermocouple connected!");
-        return NAN;
+    // Parse any available response
+    while (NanoSerial.available()) {
+        char c = NanoSerial.read();
+        safeSerialPrintf("Nano UART: RX char '%c'\n", c);
+        if (c == '\n' || c == '\r') {
+            if (tempLine.length() > 0) {
+                int idx = tempLine.indexOf(":");
+                String valStr = (idx >= 0) ? tempLine.substring(idx + 1) : tempLine;
+                valStr.trim();
+                lastTempC = valStr.toFloat();
+                safeSerialPrintf("Nano UART: Received temp line '%s' -> %.2f°C\n", tempLine.c_str(), lastTempC);
+                tempLine = "";
+            }
+        } else {
+            tempLine += c;
+        }
     }
-    float tempC = ((value >> 3) & 0xFFF) * 0.25f;
-    safeSerialPrintf("MAX6675 SPI: Decoded temperature: %.2f°C\n", tempC);
-    return tempC;
-}
-
-void max6675_init() {
-    safeSerialPrintln("MAX6675 SPI: Initializing SPI bus...");
-    spi_bus_config_t buscfg = {};
-    buscfg.mosi_io_num = -1;
-    buscfg.miso_io_num = MAX6675_PIN_SO;
-    buscfg.sclk_io_num = MAX6675_PIN_CLK;
-    buscfg.quadwp_io_num = -1;
-    buscfg.quadhd_io_num = -1;
-    buscfg.max_transfer_sz = 2;
-    safeSerialPrintf("MAX6675 SPI: buscfg: miso=%d, sclk=%d, mosi=%d\n", buscfg.miso_io_num, buscfg.sclk_io_num, buscfg.mosi_io_num);
-    esp_err_t bus_ret = spi_bus_initialize(MAX6675_SPI_HOST, &buscfg, SPI_DMA_CH_AUTO);
-    safeSerialPrintf("MAX6675 SPI: spi_bus_initialize() returned: %d\n", bus_ret);
-
-    safeSerialPrintln("MAX6675 SPI: Adding SPI device...");
-    spi_device_interface_config_t devcfg = {};
-    devcfg.clock_speed_hz = 1000000; // 1 MHz
-    devcfg.mode = 0;
-    devcfg.spics_io_num = MAX6675_PIN_CS;
-    devcfg.queue_size = 1;
-    devcfg.flags = SPI_DEVICE_NO_DUMMY;
-    safeSerialPrintf("MAX6675 SPI: devcfg: cs=%d, clock=%d, mode=%d\n", devcfg.spics_io_num, devcfg.clock_speed_hz, devcfg.mode);
-    esp_err_t dev_ret = spi_bus_add_device(MAX6675_SPI_HOST, &devcfg, &max6675_spi);
-    safeSerialPrintf("MAX6675 SPI: spi_bus_add_device() returned: %d, handle=%p\n", dev_ret, max6675_spi);
+    // Return last valid temperature (may be NAN if not received yet)
+    return lastTempC;
 }
 
 
@@ -559,18 +540,11 @@ void setup(){
   digitalWrite(5, HIGH);
   Serial.println("Display power enabled");
 
-  // Explicitly set MAX6675 CS pin as OUTPUT (no pullup/pulldown)
-  Serial.println("Setting up MAX6675 CS pin...");
-  pinMode(MAX6675_PIN_CS, OUTPUT);
-  digitalWrite(MAX6675_PIN_CS, HIGH); // Default CS inactive
-  Serial.println("MAX6675 CS pin set as OUTPUT and HIGH");
+  // Initialize Nano UART
+  Serial.println("Initializing Nano UART...");
+  NanoSerial.begin(115200, SERIAL_8N1, NANO_UART_RX, NANO_UART_TX);
+  Serial.println("Nano UART initialized on GPIO43/44");
 
-  // Explicitly set MAX6675 SPI pins
-  Serial.println("Setting up MAX6675 SCK and SO pins...");
-  pinMode(MAX6675_PIN_CLK, OUTPUT);      // SCK: output
-  pinMode(MAX6675_PIN_SO, INPUT);        // SO/MISO: input
-  Serial.println("MAX6675 SCK set as OUTPUT, SO set as INPUT");
-  
   // Initialize display with error handling
   Serial.println("Initializing display...");
   delay(500);  // Give display time to power up
@@ -589,10 +563,8 @@ void setup(){
   touch.setRotation(1);
   Serial.println("Touch initialized");
 
-  // Initialize MAX6675 SPI thermocouple
-  Serial.println("Initializing MAX6675 SPI...");
-  max6675_init();
-  Serial.println("MAX6675 SPI initialized");
+
+  // No MAX6675 SPI init needed
 
 
   // Configure PID controller
@@ -685,7 +657,7 @@ void setup(){
 void loop(){
   Serial.print("GPIO5 state: ");
   Serial.println(digitalRead(5));
-  delay(1000);
+  // Removed blocking delay for smooth UI and telemetry
   // Full loop with LVGL timer handling and telemetry
   static uint32_t lastTick = 0, lastTele = 0, lastPrint = 0;
   static uint32_t lastWatchdog = 0;
@@ -699,7 +671,10 @@ void loop(){
     safeSerialPrintf("WATCHDOG: Free heap: %lu bytes (min: %lu), Override: %s, Screens: T=%p O=%p S=%p P=%p\n", 
                      freeHeap, minFreeHeap, overrideMode ? "ON" : "OFF", 
                      scrTelem, scrOverride, scrSettings, scrPIDTune);
-    
+
+    // Add Pololu G2 input voltage debug
+    debugPrintG2Voltage();
+
     // Alert if memory is getting low
     if (freeHeap < 10000) {
       safeSerialPrintln("WARNING: Low memory detected!");
@@ -785,7 +760,7 @@ void loop(){
     // PID control mode - use temperature control
     if (now - lastPidUpdateTime >= PID_UPDATE_INTERVAL) {
       lastPidUpdateTime = now;
-      float currentTemp = readMax6675Temp();
+      float currentTemp = readNanoTemp();
       // Validate temperature reading before using in PID
       if (!isnan(currentTemp) && currentTemp >= 0.0 && currentTemp <= 1024.0) {
         temperatureInput = currentTemp;
@@ -817,7 +792,7 @@ void loop(){
   }
   
   // Safety monitoring - check if heater is working properly
-  float currentTemp = readMax6675Temp();
+  float currentTemp = readNanoTemp();
   updateSafetyMonitoring(hotWireOutput, currentTemp);
   
   // Apply safety shutdown if error detected
@@ -1031,7 +1006,7 @@ void scheduleEepromSave() {
 
 void startPIDAutotune(float setpoint, float outputStep) {
   // Validate current temperature reading before starting autotune
-  float currentTemp = readMax6675Temp();
+  float currentTemp = readNanoTemp();
   if (isnan(currentTemp) || currentTemp < -270.0 || currentTemp > 1000.0) {
     safeSerialPrintf("Cannot start autotune - invalid temperature reading: %.1f°C\n", currentTemp);
     return;
@@ -1047,7 +1022,7 @@ void startPIDAutotune(float setpoint, float outputStep) {
   autotuneDirection = true;
   autotuneLastSwitch = millis();
   autotuneNumPeaks = 0;
-  autotuneLastTemp = readMax6675Temp();
+  autotuneLastTemp = readNanoTemp();
   autotuneTempRising = true;
   autotuneKu = 0.0;
   autotunePu = 0.0;
@@ -1064,7 +1039,7 @@ void updatePIDAutotune() {
   if (!autotuneActive || autotuneState != 1) return;
   
   uint32_t now = millis();
-  float currentTemp = readMax6675Temp();
+  float currentTemp = readNanoTemp();
   
   // Validate temperature reading before using in autotune
   if (isnan(currentTemp) || currentTemp < -270.0 || currentTemp > 1000.0) {

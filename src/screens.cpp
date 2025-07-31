@@ -944,7 +944,7 @@ void updatePIDTuneStatus() {
 void updateTelemetry() {
     if (!lblVal[0] || !lblVal[1] || !lblVal[2] || !lblVal[3]) return;
     
-    float temp = readMax6675Temp();
+    float temp = readNanoTemp();
     float displayTemp = temp;  // Use raw temperature without offset
     
     // Read actual current from G2 motor controller (variable ID 44)
@@ -1057,7 +1057,7 @@ void updateOverrideScreen() {
     // Update temperature display with exception handling
     try {
         if (lblOverrideTemp) {
-            float temp = readMax6675Temp();
+            float temp = readNanoTemp();
             char buf[32];
             sprintf(buf, "%.1f C", temp);
             lv_label_set_text(lblOverrideTemp, buf);

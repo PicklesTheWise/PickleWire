@@ -72,6 +72,8 @@ extern float CUR_MIN, CUR_MAX, CUR_STEP, OFF_STEP;
 // Function declarations
 void buildTelemetryScreen();
 void buildOverrideScreen();
+// Read temperature from Nano over UART
+float readNanoTemp();
 void buildSettingsScreen();
 void buildPIDTuneScreen();
 void updateTelemetry();
