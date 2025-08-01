@@ -28,6 +28,7 @@ extern void sendPololuMotorForward(uint16_t speed);
 extern void sendPololuSetCurrentLimit(float selector_A);
 extern uint16_t readG2(uint8_t id);
 extern uint32_t readRCPulse();
+extern float CUR_MIN, CUR_MAX, CUR_STEP;
 
 extern void scheduleEepromSave();
 extern void safeSerialPrint(const char* msg);
@@ -252,19 +253,20 @@ void buildOverrideScreen() {
     // Temperature control section - center, moved up 20px
     lv_obj_t *lblTempTitle = lv_label_create(scrOverride);
     lv_label_set_text(lblTempTitle, "Target Temperature:");
-    lv_obj_align(lblTempTitle, LV_ALIGN_CENTER, 0, -10);
+    lv_obj_align(lblTempTitle, LV_ALIGN_CENTER, 0, -40);
     lv_obj_set_style_text_color(lblTempTitle, lv_color_hex(0xFFFFFF), 0);
 
     // Temperature decrease button
     btnTempDown = lv_btn_create(scrOverride);
     lv_obj_set_size(btnTempDown, 50, 35);
-    lv_obj_align(btnTempDown, LV_ALIGN_CENTER, -80, 20);
+    lv_obj_align(btnTempDown, LV_ALIGN_CENTER, -80, -10);
     lblTempDown = lv_label_create(btnTempDown);
     lv_label_set_text(lblTempDown, "-");
     lv_obj_center(lblTempDown);
     lv_obj_add_event_cb(btnTempDown, [](lv_event_t* e) {
         temperatureSetpoint = max(0.0, temperatureSetpoint - 5.0);
         pidEnabled = true;
+        overrideMode = false;  // Exit override mode when using PID
         scheduleEepromSave();
         
         // Update the display immediately
@@ -280,19 +282,20 @@ void buildOverrideScreen() {
     char tempBuf[16];
     sprintf(tempBuf, "%.1f C", (float)temperatureSetpoint);
     lv_label_set_text(lblSliderVal, tempBuf);
-    lv_obj_align(lblSliderVal, LV_ALIGN_CENTER, 0, 20);
+    lv_obj_align(lblSliderVal, LV_ALIGN_CENTER, 0, -10);
     lv_obj_set_style_text_color(lblSliderVal, lv_color_hex(0x00FF00), 0);
 
     // Temperature increase button
     btnTempUp = lv_btn_create(scrOverride);
     lv_obj_set_size(btnTempUp, 50, 35);
-    lv_obj_align(btnTempUp, LV_ALIGN_CENTER, 80, 20);
+    lv_obj_align(btnTempUp, LV_ALIGN_CENTER, 80, -10);
     lblTempUp = lv_label_create(btnTempUp);
     lv_label_set_text(lblTempUp, "+");
     lv_obj_center(lblTempUp);
     lv_obj_add_event_cb(btnTempUp, [](lv_event_t* e) {
         temperatureSetpoint = min(500.0, temperatureSetpoint + 5.0);
         pidEnabled = true;
+        overrideMode = false;  // Exit override mode when using PID
         scheduleEepromSave();
         
         // Update the display immediately
@@ -303,10 +306,80 @@ void buildOverrideScreen() {
         }
     }, LV_EVENT_CLICKED, NULL);
 
-    // Emergency stop button - bottom left
+    // Manual Power Control section
+    lv_obj_t *lblPowerTitle = lv_label_create(scrOverride);
+    lv_label_set_text(lblPowerTitle, "Manual Power:");
+    lv_obj_align(lblPowerTitle, LV_ALIGN_CENTER, 0, 30);
+    lv_obj_set_style_text_color(lblPowerTitle, lv_color_hex(0xFFFFFF), 0);
+
+    // Power decrease button
+    lv_obj_t *btnPowerDown = lv_btn_create(scrOverride);
+    lv_obj_set_size(btnPowerDown, 50, 35);
+    lv_obj_align(btnPowerDown, LV_ALIGN_CENTER, -80, 60);
+    lv_obj_t *lblPowerDown = lv_label_create(btnPowerDown);
+    lv_label_set_text(lblPowerDown, "-");
+    lv_obj_center(lblPowerDown);
+    lv_obj_add_event_cb(btnPowerDown, [](lv_event_t* e) {
+        manualPWM = max(0, (int)manualPWM - 160);  // Decrease by 5%
+        overrideMode = true;   // Enter override mode
+        pidEnabled = false;    // Disable PID when in manual mode
+        
+        // Update display immediately
+        if (lblManualPower) {
+            char powerBuf[16];
+            sprintf(powerBuf, "%u (%.1f%%)", manualPWM, (manualPWM/3200.0f)*100.0f);
+            lv_label_set_text(lblManualPower, powerBuf);
+        }
+        
+        safeSerialPrintf("Manual power decreased to %u (%.1f%%)\n", manualPWM, (manualPWM/3200.0f)*100.0f);
+    }, LV_EVENT_CLICKED, NULL);
+
+    // Manual power display
+    lblManualPower = lv_label_create(scrOverride);
+    char powerBuf[16];
+    sprintf(powerBuf, "%u (%.1f%%)", manualPWM, (manualPWM/3200.0f)*100.0f);
+    lv_label_set_text(lblManualPower, powerBuf);
+    lv_obj_align(lblManualPower, LV_ALIGN_CENTER, 0, 60);
+    lv_obj_set_style_text_color(lblManualPower, lv_color_hex(0xFF6666), 0);
+
+    // Power increase button
+    lv_obj_t *btnPowerUp = lv_btn_create(scrOverride);
+    lv_obj_set_size(btnPowerUp, 50, 35);
+    lv_obj_align(btnPowerUp, LV_ALIGN_CENTER, 80, 60);
+    lv_obj_t *lblPowerUp = lv_label_create(btnPowerUp);
+    lv_label_set_text(lblPowerUp, "+");
+    lv_obj_center(lblPowerUp);
+    lv_obj_add_event_cb(btnPowerUp, [](lv_event_t* e) {
+        manualPWM = min(3200, (int)manualPWM + 160);  // Increase by 5%
+        overrideMode = true;   // Enter override mode
+        pidEnabled = false;    // Disable PID when in manual mode
+        
+        // Update display immediately
+        if (lblManualPower) {
+            char powerBuf[16];
+            sprintf(powerBuf, "%u (%.1f%%)", manualPWM, (manualPWM/3200.0f)*100.0f);
+            lv_label_set_text(lblManualPower, powerBuf);
+        }
+        
+        safeSerialPrintf("Manual power increased to %u (%.1f%%)\n", manualPWM, (manualPWM/3200.0f)*100.0f);
+    }, LV_EVENT_CLICKED, NULL);
+
+    // Back button - bottom left
+    lv_obj_t *btnBack = lv_btn_create(scrOverride);
+    lv_obj_set_size(btnBack, 50, 25);
+    lv_obj_align(btnBack, LV_ALIGN_BOTTOM_LEFT, 5, -5);
+    lv_obj_t *lblBack = lv_label_create(btnBack);
+    lv_label_set_text(lblBack, "Back");
+    lv_obj_center(lblBack);
+    lv_obj_add_event_cb(btnBack, [](lv_event_t* e) {
+        // Simply navigate back - leave PID state as user set it
+        safeNavigateToScreen(scrTelem, "Telemetry");
+    }, LV_EVENT_CLICKED, nullptr);
+
+    // Emergency stop button - bottom between back and PID
     lv_obj_t *btnEmergencyStop = lv_btn_create(scrOverride);
-    lv_obj_set_size(btnEmergencyStop, 60, 30);
-    lv_obj_align(btnEmergencyStop, LV_ALIGN_BOTTOM_LEFT, 10, -40);
+    lv_obj_set_size(btnEmergencyStop, 50, 25);
+    lv_obj_align(btnEmergencyStop, LV_ALIGN_BOTTOM_LEFT, 60, -5);
     lv_obj_set_style_bg_color(btnEmergencyStop, lv_color_hex(0xFF0000), 0);
     lv_obj_t *lblEmergencyStop = lv_label_create(btnEmergencyStop);
     lv_label_set_text(lblEmergencyStop, "STOP");
@@ -321,24 +394,16 @@ void buildOverrideScreen() {
         if (lblSliderVal) {
             lv_label_set_text(lblSliderVal, "0.0 C");
         }
+        if (lblManualPower) {
+            lv_label_set_text(lblManualPower, "0 (0.0%)");
+        }
+        safeSerialPrintln("EMERGENCY STOP: All power systems disabled");
     }, LV_EVENT_CLICKED, nullptr);
 
-    // Back button - bottom left
-    lv_obj_t *btnBack = lv_btn_create(scrOverride);
-    lv_obj_set_size(btnBack, 60, 25);
-    lv_obj_align(btnBack, LV_ALIGN_BOTTOM_LEFT, 10, -5);
-    lv_obj_t *lblBack = lv_label_create(btnBack);
-    lv_label_set_text(lblBack, "Back");
-    lv_obj_center(lblBack);
-    lv_obj_add_event_cb(btnBack, [](lv_event_t* e) {
-        // Simply navigate back - leave PID state as user set it
-        safeNavigateToScreen(scrTelem, "Telemetry");
-    }, LV_EVENT_CLICKED, nullptr);
-
-    // PID enable button - bottom center left
-    lv_obj_t *btnPidEnable = lv_btn_create(scrOverride);
-    lv_obj_set_size(btnPidEnable, 80, 25);
-    lv_obj_align(btnPidEnable, LV_ALIGN_BOTTOM_MID, -45, -5);
+    // PID enable button - bottom center left (moved further right to avoid overlap)
+    btnPidEnable = lv_btn_create(scrOverride);
+    lv_obj_set_size(btnPidEnable, 70, 25);
+    lv_obj_align(btnPidEnable, LV_ALIGN_BOTTOM_LEFT, 120, -5);  // Changed from BOTTOM_MID to BOTTOM_LEFT with fixed position
     lv_obj_t *lblPidEnable = lv_label_create(btnPidEnable);
     lv_label_set_text(lblPidEnable, pidEnabled ? "PID: ON" : "PID: OFF");
     lv_obj_center(lblPidEnable);
@@ -364,10 +429,10 @@ void buildOverrideScreen() {
         lv_obj_set_style_bg_color(btnPidEnable, lv_color_hex(0x888888), 0);
     }
     
-    // Safety reset button - bottom center right
+    // Safety reset button - bottom right area
     lv_obj_t *btnSafetyReset = lv_btn_create(scrOverride);
-    lv_obj_set_size(btnSafetyReset, 80, 25);
-    lv_obj_align(btnSafetyReset, LV_ALIGN_BOTTOM_MID, 45, -5);
+    lv_obj_set_size(btnSafetyReset, 70, 25);
+    lv_obj_align(btnSafetyReset, LV_ALIGN_BOTTOM_LEFT, 200, -5);  // Fixed positioning to avoid overlap
     lv_obj_t *lblSafetyReset = lv_label_create(btnSafetyReset);
     lv_label_set_text(lblSafetyReset, "RESET");
     lv_obj_center(lblSafetyReset);
@@ -640,23 +705,34 @@ void buildSettingsScreen() {
         float step = (code == LV_EVENT_LONG_PRESSED_REPEAT) ? CUR_STEP * 5 : CUR_STEP;
         currentLimit -= step;
         if (currentLimit < CUR_MIN) currentLimit = CUR_MIN;
+        
+        // Update the label immediately
         if (lblSetCurrent) {
             char buffer[32];
             sprintf(buffer, "Current Limit: %.1f A", currentLimit);
             lv_label_set_text(lblSetCurrent, buffer);
         }
+        
+        // Send to Pololu controller
+        sendPololuSetCurrentLimit(currentLimit);
         scheduleEepromSave();
     }, LV_EVENT_CLICKED, nullptr);
+    
     lv_obj_add_event_cb(btnCurrentLeft, [](lv_event_t* e) {
         lv_event_code_t code = lv_event_get_code(e);
         float step = (code == LV_EVENT_LONG_PRESSED_REPEAT) ? CUR_STEP * 5 : CUR_STEP;
         currentLimit -= step;
         if (currentLimit < CUR_MIN) currentLimit = CUR_MIN;
+        
+        // Update the label immediately
         if (lblSetCurrent) {
             char buffer[32];
             sprintf(buffer, "Current Limit: %.1f A", currentLimit);
             lv_label_set_text(lblSetCurrent, buffer);
         }
+        
+        // Send to Pololu controller
+        sendPololuSetCurrentLimit(currentLimit);
         scheduleEepromSave();
     }, LV_EVENT_LONG_PRESSED_REPEAT, nullptr);
 
@@ -665,23 +741,34 @@ void buildSettingsScreen() {
         float step = (code == LV_EVENT_LONG_PRESSED_REPEAT) ? CUR_STEP * 5 : CUR_STEP;
         currentLimit += step;
         if (currentLimit > CUR_MAX) currentLimit = CUR_MAX;
+        
+        // Update the label immediately
         if (lblSetCurrent) {
             char buffer[32];
             sprintf(buffer, "Current Limit: %.1f A", currentLimit);
             lv_label_set_text(lblSetCurrent, buffer);
         }
+        
+        // Send to Pololu controller
+        sendPololuSetCurrentLimit(currentLimit);
         scheduleEepromSave();
     }, LV_EVENT_CLICKED, nullptr);
+    
     lv_obj_add_event_cb(btnCurrentRight, [](lv_event_t* e) {
         lv_event_code_t code = lv_event_get_code(e);
         float step = (code == LV_EVENT_LONG_PRESSED_REPEAT) ? CUR_STEP * 5 : CUR_STEP;
         currentLimit += step;
         if (currentLimit > CUR_MAX) currentLimit = CUR_MAX;
+        
+        // Update the label immediately
         if (lblSetCurrent) {
             char buffer[32];
             sprintf(buffer, "Current Limit: %.1f A", currentLimit);
             lv_label_set_text(lblSetCurrent, buffer);
         }
+        
+        // Send to Pololu controller
+        sendPololuSetCurrentLimit(currentLimit);
         scheduleEepromSave();
     }, LV_EVENT_LONG_PRESSED_REPEAT, nullptr);
 
@@ -755,6 +842,9 @@ void buildSettingsScreen() {
         }
     }, LV_EVENT_CLICKED, nullptr);
     
+    // Initialize current limit from G2 controller after all UI elements are created
+    initCurrentLimitFromG2();
+    
     // Settings screen build complete
 }
 
@@ -765,63 +855,187 @@ void buildPIDTuneScreen() {
     lv_obj_set_style_bg_color(scrPIDTune, lv_color_hex(0x1a1a1a), 0);
     lv_obj_set_style_bg_opa(scrPIDTune, LV_OPA_COVER, 0);
 
-    // Title
+    // Title with improved styling
     lv_obj_t *lblTitle = lv_label_create(scrPIDTune);
     lv_label_set_text(lblTitle, "PID Tuning");
     lv_obj_align(lblTitle, LV_ALIGN_TOP_MID, 0, 8);
     lv_obj_set_style_text_font(lblTitle, LV_FONT_DEFAULT, 0);
     lv_obj_set_style_text_color(lblTitle, lv_color_hex(0x00FF00), 0);
 
-    // Container for better organization
+    // PID container for better organization
     lv_obj_t *container = lv_obj_create(scrPIDTune);
     lv_obj_set_size(container, 300, 180);
-    lv_obj_align(container, LV_ALIGN_CENTER, 0, -10);
+    lv_obj_align(container, LV_ALIGN_CENTER, 0, 10);  // Moved down from -10 to +10
     lv_obj_set_style_bg_color(container, lv_color_hex(0x2a2a2a), 0);
     lv_obj_set_style_border_color(container, lv_color_hex(0x404040), 0);
     lv_obj_set_style_border_width(container, 1, 0);
     lv_obj_set_style_radius(container, 5, 0);
-    lv_obj_set_style_pad_all(container, 15, 0);
+    lv_obj_set_style_pad_all(container, 10, 0);
 
-    // Current PID values display
+    // Current PID values section header
     lv_obj_t *lblCurrentPID = lv_label_create(container);
     lv_label_set_text(lblCurrentPID, "Current PID Values:");
-    lv_obj_align(lblCurrentPID, LV_ALIGN_TOP_LEFT, 0, 0);
+    lv_obj_align(lblCurrentPID, LV_ALIGN_TOP_LEFT, 0, 5);
     lv_obj_set_style_text_color(lblCurrentPID, lv_color_hex(0xFFFFFF), 0);
 
     lblSetPidKp = lv_label_create(container);
     char kpBuffer[32];
     sprintf(kpBuffer, "Kp: %.2f", pidKp);
     lv_label_set_text(lblSetPidKp, kpBuffer);
-    lv_obj_align(lblSetPidKp, LV_ALIGN_TOP_LEFT, 10, 25);
+    lv_obj_align(lblSetPidKp, LV_ALIGN_TOP_LEFT, 10, 30);
     lv_obj_set_style_text_color(lblSetPidKp, lv_color_hex(0xCCCCCC), 0);
+
+    // Kp adjustment buttons next to readout
+    btnPidKpLeft = lv_btn_create(container);
+    lv_obj_set_size(btnPidKpLeft, 25, 20);
+    lv_obj_align(btnPidKpLeft, LV_ALIGN_TOP_LEFT, 100, 30);
+    lv_obj_set_style_bg_color(btnPidKpLeft, lv_color_hex(0xFF4444), 0);  // Red for decrease
+    lv_obj_t *lblKpLeft = lv_label_create(btnPidKpLeft);
+    lv_label_set_text(lblKpLeft, "-");
+    lv_obj_center(lblKpLeft);
+    
+    btnPidKpRight = lv_btn_create(container);
+    lv_obj_set_size(btnPidKpRight, 25, 20);
+    lv_obj_align(btnPidKpRight, LV_ALIGN_TOP_LEFT, 130, 30);
+    lv_obj_set_style_bg_color(btnPidKpRight, lv_color_hex(0x44FF44), 0);  // Green for increase
+    lv_obj_t *lblKpRight = lv_label_create(btnPidKpRight);
+    lv_label_set_text(lblKpRight, "+");
+    lv_obj_center(lblKpRight);
 
     lblSetPidKi = lv_label_create(container);
     char kiBuffer[32];
     sprintf(kiBuffer, "Ki: %.3f", pidKi);
     lv_label_set_text(lblSetPidKi, kiBuffer);
-    lv_obj_align(lblSetPidKi, LV_ALIGN_TOP_LEFT, 10, 45);
+    lv_obj_align(lblSetPidKi, LV_ALIGN_TOP_LEFT, 10, 55);
     lv_obj_set_style_text_color(lblSetPidKi, lv_color_hex(0xCCCCCC), 0);
+
+    // Ki adjustment buttons next to readout
+    btnPidKiLeft = lv_btn_create(container);
+    lv_obj_set_size(btnPidKiLeft, 25, 20);
+    lv_obj_align(btnPidKiLeft, LV_ALIGN_TOP_LEFT, 100, 55);
+    lv_obj_set_style_bg_color(btnPidKiLeft, lv_color_hex(0xFF4444), 0);  // Red for decrease
+    lv_obj_t *lblKiLeft = lv_label_create(btnPidKiLeft);
+    lv_label_set_text(lblKiLeft, "-");
+    lv_obj_center(lblKiLeft);
+    
+    btnPidKiRight = lv_btn_create(container);
+    lv_obj_set_size(btnPidKiRight, 25, 20);
+    lv_obj_align(btnPidKiRight, LV_ALIGN_TOP_LEFT, 130, 55);
+    lv_obj_set_style_bg_color(btnPidKiRight, lv_color_hex(0x44FF44), 0);  // Green for increase
+    lv_obj_t *lblKiRight = lv_label_create(btnPidKiRight);
+    lv_label_set_text(lblKiRight, "+");
+    lv_obj_center(lblKiRight);
 
     lblSetPidKd = lv_label_create(container);
     char kdBuffer[32];
     sprintf(kdBuffer, "Kd: %.2f", pidKd);
     lv_label_set_text(lblSetPidKd, kdBuffer);
-    lv_obj_align(lblSetPidKd, LV_ALIGN_TOP_LEFT, 10, 65);
+    lv_obj_align(lblSetPidKd, LV_ALIGN_TOP_LEFT, 10, 80);
     lv_obj_set_style_text_color(lblSetPidKd, lv_color_hex(0xCCCCCC), 0);
+
+    // Kd adjustment buttons next to readout
+    btnPidKdLeft = lv_btn_create(container);
+    lv_obj_set_size(btnPidKdLeft, 25, 20);
+    lv_obj_align(btnPidKdLeft, LV_ALIGN_TOP_LEFT, 100, 80);
+    lv_obj_set_style_bg_color(btnPidKdLeft, lv_color_hex(0xFF4444), 0);  // Red for decrease
+    lv_obj_t *lblKdLeft = lv_label_create(btnPidKdLeft);
+    lv_label_set_text(lblKdLeft, "-");
+    lv_obj_center(lblKdLeft);
+    
+    btnPidKdRight = lv_btn_create(container);
+    lv_obj_set_size(btnPidKdRight, 25, 20);
+    lv_obj_align(btnPidKdRight, LV_ALIGN_TOP_LEFT, 130, 80);
+    lv_obj_set_style_bg_color(btnPidKdRight, lv_color_hex(0x44FF44), 0);  // Green for increase
+    lv_obj_t *lblKdRight = lv_label_create(btnPidKdRight);
+    lv_label_set_text(lblKdRight, "+");
+    lv_obj_center(lblKdRight);
 
     // Autotune status
     lblPidStatus = lv_label_create(container);
     lv_label_set_text(lblPidStatus, "Status: Ready");
-    lv_obj_align(lblPidStatus, LV_ALIGN_TOP_LEFT, 0, 95);
+    lv_obj_align(lblPidStatus, LV_ALIGN_TOP_LEFT, 0, 110);
     lv_obj_set_style_text_color(lblPidStatus, lv_color_hex(0x00FF00), 0);
 
-    // Autotune button
-    lv_obj_t *btnAutotune = lv_btn_create(container);
-    lv_obj_set_size(btnAutotune, 120, 35);
-    lv_obj_align(btnAutotune, LV_ALIGN_TOP_RIGHT, -10, 85);
-    lv_obj_set_style_bg_color(btnAutotune, lv_color_hex(0x0080FF), 0);
+    // Add event handlers for manual PID adjustments
+    lv_obj_add_event_cb(btnPidKpLeft, [](lv_event_t* e) {
+        pidKp -= 1.0f;
+        if (pidKp < 0.1f) pidKp = 0.1f;
+        tempPID.SetTunings(pidKp, pidKi, pidKd);
+        
+        char buffer[32];
+        sprintf(buffer, "Kp: %.2f", pidKp);
+        lv_label_set_text(lblSetPidKp, buffer);
+        scheduleEepromSave();
+        safeSerialPrintf("PID Kp decreased to %.2f\n", pidKp);
+    }, LV_EVENT_CLICKED, nullptr);
+
+    lv_obj_add_event_cb(btnPidKpRight, [](lv_event_t* e) {
+        pidKp += 1.0f;
+        if (pidKp > 100.0f) pidKp = 100.0f;
+        tempPID.SetTunings(pidKp, pidKi, pidKd);
+        
+        char buffer[32];
+        sprintf(buffer, "Kp: %.2f", pidKp);
+        lv_label_set_text(lblSetPidKp, buffer);
+        scheduleEepromSave();
+        safeSerialPrintf("PID Kp increased to %.2f\n", pidKp);
+    }, LV_EVENT_CLICKED, nullptr);
+
+    lv_obj_add_event_cb(btnPidKiLeft, [](lv_event_t* e) {
+        pidKi -= 0.01f;
+        if (pidKi < 0.001f) pidKi = 0.001f;
+        tempPID.SetTunings(pidKp, pidKi, pidKd);
+        
+        char buffer[32];
+        sprintf(buffer, "Ki: %.3f", pidKi);
+        lv_label_set_text(lblSetPidKi, buffer);
+        scheduleEepromSave();
+        safeSerialPrintf("PID Ki decreased to %.3f\n", pidKi);
+    }, LV_EVENT_CLICKED, nullptr);
+
+    lv_obj_add_event_cb(btnPidKiRight, [](lv_event_t* e) {
+        pidKi += 0.01f;
+        if (pidKi > 1.0f) pidKi = 1.0f;
+        tempPID.SetTunings(pidKp, pidKi, pidKd);
+        
+        char buffer[32];
+        sprintf(buffer, "Ki: %.3f", pidKi);
+        lv_label_set_text(lblSetPidKi, buffer);
+        scheduleEepromSave();
+        safeSerialPrintf("PID Ki increased to %.3f\n", pidKi);
+    }, LV_EVENT_CLICKED, nullptr);
+
+    lv_obj_add_event_cb(btnPidKdLeft, [](lv_event_t* e) {
+        pidKd -= 0.5f;
+        if (pidKd < 0.1f) pidKd = 0.1f;
+        tempPID.SetTunings(pidKp, pidKi, pidKd);
+        
+        char buffer[32];
+        sprintf(buffer, "Kd: %.2f", pidKd);
+        lv_label_set_text(lblSetPidKd, buffer);
+        scheduleEepromSave();
+        safeSerialPrintf("PID Kd decreased to %.2f\n", pidKd);
+    }, LV_EVENT_CLICKED, nullptr);
+
+    lv_obj_add_event_cb(btnPidKdRight, [](lv_event_t* e) {
+        pidKd += 0.5f;
+        if (pidKd > 50.0f) pidKd = 50.0f;
+        tempPID.SetTunings(pidKp, pidKi, pidKd);
+        
+        char buffer[32];
+        sprintf(buffer, "Kd: %.2f", pidKd);
+        lv_label_set_text(lblSetPidKd, buffer);
+        scheduleEepromSave();
+        safeSerialPrintf("PID Kd increased to %.2f\n", pidKd);
+    }, LV_EVENT_CLICKED, nullptr);
+
+    // Autotune button - bottom right
+    lv_obj_t *btnAutotune = lv_btn_create(scrPIDTune);
+    lv_obj_set_size(btnAutotune, 100, 30);
+    lv_obj_align(btnAutotune, LV_ALIGN_BOTTOM_RIGHT, -10, -10);
+    lv_obj_set_style_bg_color(btnAutotune, lv_color_hex(0x0080FF), 0);  // Blue for autotune
     lv_obj_t *lblAutotune = lv_label_create(btnAutotune);
-    lv_label_set_text(lblAutotune, "Start Autotune");
+    lv_label_set_text(lblAutotune, "Autotune");
     lv_obj_center(lblAutotune);
     
     lv_obj_add_event_cb(btnAutotune, [](lv_event_t* e) {
@@ -834,57 +1048,17 @@ void buildPIDTuneScreen() {
                 lv_label_set_text(lblPidStatus, "Status: Running...");
                 lv_obj_set_style_text_color(lblPidStatus, lv_color_hex(0xFFAA00), 0);
             }
+            
+            safeSerialPrintf("PID Autotune started: Target=%.1f°C, Current Limit=%.1f A\n", 
+                             targetTemp, currentLimit);
         }
     }, LV_EVENT_CLICKED, nullptr);
 
-    // Manual adjustment buttons (Kp)
-    lv_obj_t *lblKpAdjust = lv_label_create(container);
-    lv_label_set_text(lblKpAdjust, "Manual Adjust:");
-    lv_obj_align(lblKpAdjust, LV_ALIGN_TOP_LEFT, 0, 125);
-    lv_obj_set_style_text_color(lblKpAdjust, lv_color_hex(0xFFFFFF), 0);
-
-    // Kp adjustment
-    btnPidKpLeft = lv_btn_create(container);
-    lv_obj_set_size(btnPidKpLeft, 25, 25);
-    lv_obj_align(btnPidKpLeft, LV_ALIGN_TOP_LEFT, 120, 120);
-    lv_obj_t *lblKpLeft = lv_label_create(btnPidKpLeft);
-    lv_label_set_text(lblKpLeft, "-");
-    lv_obj_center(lblKpLeft);
-    
-    btnPidKpRight = lv_btn_create(container);
-    lv_obj_set_size(btnPidKpRight, 25, 25);
-    lv_obj_align(btnPidKpRight, LV_ALIGN_TOP_LEFT, 190, 120);
-    lv_obj_t *lblKpRight = lv_label_create(btnPidKpRight);
-    lv_label_set_text(lblKpRight, "+");
-    lv_obj_center(lblKpRight);
-
-    // Add event handlers for manual Kp adjustment
-    lv_obj_add_event_cb(btnPidKpLeft, [](lv_event_t* e) {
-        pidKp -= 1.0f;
-        if (pidKp < 0.1f) pidKp = 0.1f;
-        tempPID.SetTunings(pidKp, pidKi, pidKd);
-        
-        char buffer[32];
-        sprintf(buffer, "Kp: %.2f", pidKp);
-        lv_label_set_text(lblSetPidKp, buffer);
-        scheduleEepromSave();
-    }, LV_EVENT_CLICKED, nullptr);
-
-    lv_obj_add_event_cb(btnPidKpRight, [](lv_event_t* e) {
-        pidKp += 1.0f;
-        if (pidKp > 100.0f) pidKp = 100.0f;
-        tempPID.SetTunings(pidKp, pidKi, pidKd);
-        
-        char buffer[32];
-        sprintf(buffer, "Kp: %.2f", pidKp);
-        lv_label_set_text(lblSetPidKp, buffer);
-        scheduleEepromSave();
-    }, LV_EVENT_CLICKED, nullptr);
-
-    // Back button
+    // Back button - bottom left
     lv_obj_t *btnBack = lv_btn_create(scrPIDTune);
     lv_obj_set_size(btnBack, 60, 30);
     lv_obj_align(btnBack, LV_ALIGN_BOTTOM_LEFT, 10, -10);
+    lv_obj_set_style_bg_color(btnBack, lv_color_hex(0x666666), 0);  // Gray for back button
     lv_obj_t *lblBack = lv_label_create(btnBack);
     lv_label_set_text(lblBack, "Back");
     lv_obj_center(lblBack);
@@ -944,8 +1118,21 @@ void updatePIDTuneStatus() {
 void updateTelemetry() {
     if (!lblVal[0] || !lblVal[1] || !lblVal[2] || !lblVal[3]) return;
     
-    float temp = readNanoTemp();
-    float displayTemp = temp;  // Use raw temperature without offset
+    // Use cached temperature instead of calling readNanoTemp() again
+    float temp = getCachedTemp();
+    
+    // When PID is active, use temperatureInput for more responsive display
+    // Otherwise use the cached reading
+    float displayTemp = (pidEnabled && !isnan(temperatureInput)) ? (float)temperatureInput : temp;
+    
+    // Debug: Log telemetry temperature values
+    static uint32_t lastTelemetryDebug = 0;
+    uint32_t now = millis();
+    if (now - lastTelemetryDebug >= 3000) {  // Debug every 3 seconds
+        lastTelemetryDebug = now;
+        safeSerialPrintf("TELEMETRY: CachedTemp=%.2f°C, PIDTemp=%.2f°C, DisplayTemp=%.2f°C, PIDEnabled=%s\n", 
+                         temp, (float)temperatureInput, displayTemp, pidEnabled ? "YES" : "NO");
+    }
     
     // Read actual current from G2 motor controller (variable ID 44)
     uint16_t currentRaw = readG2(44);  // Current in milliamps
@@ -1037,18 +1224,18 @@ void updateOverrideScreen() {
     
     // Additional safety check - verify all critical UI objects exist and are valid LVGL objects
     if (!lblOverrideTemp || !lblOverrideRCPulse || !lblOverrideModeStatus || 
-        !lblSliderVal || !lblOverridePowerOutput) {
+        !lblSliderVal || !lblOverridePowerOutput || !lblManualPower) {
         safeSerialPrintln("ERROR: updateOverrideScreen - one or more UI objects are null!");
         safeSerialPrintf("DEBUG: lblOverrideTemp=%p, lblOverrideRCPulse=%p, lblOverrideModeStatus=%p\n", 
                         lblOverrideTemp, lblOverrideRCPulse, lblOverrideModeStatus);
-        safeSerialPrintf("DEBUG: lblSliderVal=%p, lblOverridePowerOutput=%p\n", 
-                        lblSliderVal, lblOverridePowerOutput);
+        safeSerialPrintf("DEBUG: lblSliderVal=%p, lblOverridePowerOutput=%p, lblManualPower=%p\n", 
+                        lblSliderVal, lblOverridePowerOutput, lblManualPower);
         return;
     }
     
     // Verify LVGL objects are still valid by checking if they have a parent
     if (!lblOverrideTemp->parent || !lblOverrideRCPulse->parent || !lblOverrideModeStatus->parent ||
-        !lblSliderVal->parent || !lblOverridePowerOutput->parent) {
+        !lblSliderVal->parent || !lblOverridePowerOutput->parent || !lblManualPower->parent) {
         safeSerialPrintln("ERROR: updateOverrideScreen - LVGL objects have been freed!");
         overrideScreenInitialized = false;  // Mark as corrupted
         return;
@@ -1167,6 +1354,35 @@ void updateOverrideScreen() {
             lv_obj_set_style_text_color(lblSliderVal, lv_color_hex(0x00FFFF), 0); // Cyan when inactive
         }
     }
+    
+    // Update manual power display
+    if (lblManualPower) {
+        char buf[16];
+        sprintf(buf, "%u (%.1f%%)", manualPWM, (manualPWM/3200.0f)*100.0f);
+        lv_label_set_text(lblManualPower, buf);
+        
+        // Color code based on whether override mode is active
+        if (overrideMode) {
+            lv_obj_set_style_text_color(lblManualPower, lv_color_hex(0xFF6666), 0); // Red when active
+        } else {
+            lv_obj_set_style_text_color(lblManualPower, lv_color_hex(0x888888), 0); // Gray when inactive
+        }
+    }
+    
+    // Update PID button state and color
+    if (btnPidEnable) {
+        lv_obj_t *lblPidEnable = lv_obj_get_child(btnPidEnable, 0);
+        if (lblPidEnable) {
+            lv_label_set_text(lblPidEnable, pidEnabled ? "PID: ON" : "PID: OFF");
+            
+            // Always use green when PID is enabled, gray when disabled
+            if (pidEnabled) {
+                lv_obj_set_style_bg_color(btnPidEnable, lv_color_hex(0x44FF44), 0); // Green when PID active
+            } else {
+                lv_obj_set_style_bg_color(btnPidEnable, lv_color_hex(0x888888), 0); // Gray when PID inactive
+            }
+        }
+    }
 }
 
 //------------------------------------------------------------------------------
@@ -1219,7 +1435,7 @@ void showSplashScreen() {
   
   // Version info
   lv_obj_t *lblVersion = lv_label_create(splashScreen);
-  lv_label_set_text(lblVersion, "v2.40 - ESP32S3 + AD8495");
+  lv_label_set_text(lblVersion, "v2.40 - ESP32S3 + MAX6675");
   lv_obj_align(lblVersion, LV_ALIGN_CENTER, 0, 25);
   lv_obj_set_style_text_font(lblVersion, LV_FONT_DEFAULT, 0);
   lv_obj_set_style_text_color(lblVersion, lv_color_hex(0x888888), 0); // Gray

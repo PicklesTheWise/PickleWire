@@ -10,7 +10,9 @@ extern lv_obj_t *btnNavOverride, *btnNavSettings;  // Navigation buttons
 extern lv_obj_t *lblSetWire, *lblSetOffset, *lblSetCurrent;
 extern lv_obj_t *lblOverrideTemp, *lblOverrideRCPulse, *lblOverrideModeStatus, *lblSliderVal;  // Removed slider, kept label for temp display
 extern lv_obj_t *lblOverridePowerOutput;   // Current power output label for override screen
+extern lv_obj_t *lblManualPower;           // Manual power display label for override screen
 extern lv_obj_t *btnTempDown, *btnTempUp, *lblTempDown, *lblTempUp;  // Temperature adjustment buttons
+extern lv_obj_t *btnPidEnable;             // PID enable/disable button for override screen
 extern lv_obj_t *lblPidStatus;
 extern lv_obj_t *lblChartMin, *lblChartMax;
 extern lv_obj_t *lblTitle[4], *lblVal[4], *lblBanner, *lblErrorVal;
@@ -74,6 +76,7 @@ void buildTelemetryScreen();
 void buildOverrideScreen();
 // Read temperature from Nano over UART
 float readNanoTemp();
+float getCachedTemp();  // Get cached temperature without UART calls
 void buildSettingsScreen();
 void buildPIDTuneScreen();
 void updateTelemetry();
@@ -93,6 +96,7 @@ void resetIdleTimer();
 extern void sendPololuStart();
 extern void sendPololuHotWireForward(uint16_t power);
 extern void sendPololuSetCurrentLimit(float selector_A);
+extern void initCurrentLimitFromG2();
 extern uint16_t readG2(uint8_t id);
 extern uint32_t readRCPulse();
 extern float getSmoothedTemperature();

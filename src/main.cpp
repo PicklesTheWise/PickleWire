@@ -102,10 +102,10 @@ float autotuneSetpoint = 0.0;      // Target temperature for autotune
 float autotuneOutput = 0.0;        // Output level for autotune (0-100%)
 
 // Safety monitoring system
-#define SAFETY_CHECK_INTERVAL     2000    // Check every 2 seconds
-#define SAFETY_TEMP_RISE_TIMEOUT  10000   // 10 seconds to see temperature rise
-#define SAFETY_MIN_OUTPUT         500     // Minimum output to consider "heating"
-#define SAFETY_MIN_TEMP_RISE      2.0     // Minimum temperature rise expected (°C)
+#define SAFETY_CHECK_INTERVAL     5000    // Check every 5 seconds (was 2 seconds)
+#define SAFETY_TEMP_RISE_TIMEOUT  15000   // 15 seconds to see temperature rise (was 10 seconds)
+#define SAFETY_MIN_OUTPUT         1000    // Minimum output to consider "heating" (was 500)
+#define SAFETY_MIN_TEMP_RISE      3.0     // Minimum temperature rise expected (°C) (was 2.0)
 
 bool safetyErrorState = false;            // True when safety error detected
 bool safetySystemEnabled = true;          // Enable/disable safety monitoring
@@ -159,6 +159,8 @@ void buildSettingsScreen();
 void updateTelemetry();
 void updateOverrideScreen();
 void updateDelayedEepromSave();
+void scheduleEepromSave();
+void initCurrentLimitFromG2();
 void buildPIDTuneScreen();
 void startPIDAutotune(float setpoint, float outputStep);
 void updatePIDAutotune();
@@ -166,6 +168,7 @@ void finishPIDAutotune();
 void safeSerialPrint(const char* msg);
 void safeSerialPrintln(const char* msg);
 void safeSerialPrintf(const char* format, ...);
+float getCachedTemp();
 
 // Safety monitoring function declarations
 void updateSafetyMonitoring(uint16_t currentOutput, float currentTemp);
@@ -216,6 +219,8 @@ lv_obj_t *lblTitle[4] = {nullptr}, *lblVal[4] = {nullptr}, *lblBanner = nullptr,
 lv_chart_series_t *serTemp = nullptr;
 lv_chart_series_t *serSetpoint = nullptr;  // Series for setpoint line
 lv_obj_t *lblOverrideTemp = nullptr, *lblOverrideRCPulse = nullptr, *lblOverrideModeStatus = nullptr, *lblOverrideTempSetpoint = nullptr, *lblOverridePowerOutput = nullptr, *lblSliderVal = nullptr;
+lv_obj_t *lblManualPower = nullptr;  // Manual power display label
+lv_obj_t *btnPidEnable = nullptr;    // PID enable/disable button
 lv_obj_t *btnTempDown = nullptr, *btnTempUp = nullptr, *lblTempDown = nullptr, *lblTempUp = nullptr;
 lv_obj_t *lblSetWire = nullptr, *btnWireLeft = nullptr, *btnWireRight = nullptr;
 lv_obj_t *lblSetOffset = nullptr, *btnOffsetLeft = nullptr, *btnOffsetRight = nullptr;
@@ -262,6 +267,12 @@ lv_obj_t *savedActiveScreen = nullptr;  // Screen to return to after screensaver
 // UART interface to Nano
 HardwareSerial NanoSerial(2);
 
+// Global temperature cache with smoothing
+float globalTemperatureC = NAN;
+uint32_t lastTempUpdateTime = 0;
+float tempReadings[5] = {NAN, NAN, NAN, NAN, NAN};  // Rolling buffer for smoothing
+int tempReadingIndex = 0;
+
 // Read temperature from Nano over UART
 float readNanoTemp() {
     static String tempLine = "";
@@ -273,18 +284,82 @@ float readNanoTemp() {
     if (now - lastRequestTime > 250) {
         NanoSerial.write('R');
         lastRequestTime = now;
+        
+        // Debug: Track request sending
+        static uint32_t requestCount = 0;
+        requestCount++;
+        safeSerialPrintf("UART REQ: Sent request #%lu at %lums\n", requestCount, now);
     }
     // Parse any available response
     while (NanoSerial.available()) {
         char c = NanoSerial.read();
-        safeSerialPrintf("Nano UART: RX char '%c'\n", c);
         if (c == '\n' || c == '\r') {
             if (tempLine.length() > 0) {
                 int idx = tempLine.indexOf(":");
                 String valStr = (idx >= 0) ? tempLine.substring(idx + 1) : tempLine;
                 valStr.trim();
-                lastTempC = valStr.toFloat();
-                safeSerialPrintf("Nano UART: Received temp line '%s' -> %.2f°C\n", tempLine.c_str(), lastTempC);
+                float newTempC = valStr.toFloat();
+                
+                // Validate temperature reading - reject obviously invalid values
+                bool isValidReading = true;
+                if (isnan(newTempC) || newTempC < -50.0 || newTempC > 400.0) {
+                    isValidReading = false;
+                    safeSerialPrintf("TEMP REJECT: Invalid reading %.2f°C (out of range -50 to 400°C)\n", newTempC);
+                }
+                
+                // Check for sudden jumps that indicate bad readings
+                if (isValidReading && !isnan(lastTempC)) {
+                    float tempDiff = abs(newTempC - lastTempC);
+                    
+                    // Allow larger jumps if cached temp is invalid (0°C or very old)
+                    uint32_t cacheAge = (millis() >= lastTempUpdateTime) ? (millis() - lastTempUpdateTime) : 0;
+                    bool cacheIsStale = (lastTempC <= 1.0) || (cacheAge > 10000);  // 0°C or >10 seconds old
+                    
+                    float maxAllowedJump = cacheIsStale ? 300.0 : 100.0;  // Allow 300°C jump if cache is bad
+                    
+                    if (tempDiff > maxAllowedJump) {
+                        isValidReading = false;
+                        safeSerialPrintf("TEMP REJECT: Jump too large %.2f°C (diff=%.1f°C from %.2f°C, max=%.0f°C, cache_stale=%s)\n", 
+                                         newTempC, tempDiff, lastTempC, maxAllowedJump, cacheIsStale ? "YES" : "NO");
+                    } else if (cacheIsStale) {
+                        safeSerialPrintf("TEMP RECOVERY: Accepting large jump %.2f°C (cache was stale: %.2f°C, age=%lums)\n", 
+                                         newTempC, lastTempC, cacheAge);
+                    }
+                }
+                
+                if (isValidReading) {
+                    lastTempC = newTempC;
+                    safeSerialPrintf("Temperature accepted: %.2f°C\n", lastTempC);
+                    
+                    // Add to rolling average buffer for smoothing
+                    tempReadings[tempReadingIndex] = lastTempC;
+                    tempReadingIndex = (tempReadingIndex + 1) % 5;
+                    
+                    // Calculate smoothed temperature (average of last 5 valid readings)
+                    float smoothedTemp = 0.0;
+                    int validCount = 0;
+                    for (int i = 0; i < 5; i++) {
+                        if (!isnan(tempReadings[i])) {
+                            smoothedTemp += tempReadings[i];
+                            validCount++;
+                        }
+                    }
+                    
+                    if (validCount > 0) {
+                        smoothedTemp /= validCount;
+                        // Update global temperature cache with smoothed value
+                        globalTemperatureC = smoothedTemp;
+                        lastTempUpdateTime = now;
+                        
+                        // Debug: Show both raw and smoothed values
+                        safeSerialPrintf("TEMP CACHE: Raw=%.2f°C, Smoothed=%.2f°C (from %d readings)\n", 
+                                         lastTempC, smoothedTemp, validCount);
+                    }
+                } else {
+                    safeSerialPrintf("TEMP CACHE: Keeping previous value %.2f°C (rejected %.2f°C)\n", 
+                                     globalTemperatureC, newTempC);
+                }
+                
                 tempLine = "";
             }
         } else {
@@ -293,6 +368,23 @@ float readNanoTemp() {
     }
     // Return last valid temperature (may be NAN if not received yet)
     return lastTempC;
+}
+
+// Get cached temperature (faster, non-blocking)
+float getCachedTemp() {
+    uint32_t now = millis();
+    uint32_t timeSinceUpdate = (now >= lastTempUpdateTime) ? (now - lastTempUpdateTime) : 0;
+    
+    // Debug: Log cache access
+    static uint32_t lastCacheDebug = 0;
+    if (now - lastCacheDebug >= 2000) {  // Debug every 2 seconds
+        lastCacheDebug = now;
+        safeSerialPrintf("TEMP CACHE: Value=%.2f°C, Age=%lums, Valid=%s\n", 
+                         globalTemperatureC, timeSinceUpdate, 
+                         isnan(globalTemperatureC) ? "NO" : "YES");
+    }
+    
+    return globalTemperatureC;
 }
 
 
@@ -304,22 +396,31 @@ void updateSafetyMonitoring(uint16_t currentOutput, float currentTemp) {
   
   uint32_t now = millis();
   
-  // Check if we're outputting significant heating power
-  bool isHeating = (currentOutput >= SAFETY_MIN_OUTPUT);
+  // Check if we're outputting significant heating power with hysteresis
+  bool isHeating = false;
+  if (!safetyHeatingActive) {
+    // Not currently heating - use higher threshold to start monitoring
+    isHeating = (currentOutput >= SAFETY_MIN_OUTPUT);
+  } else {
+    // Currently heating - use much lower threshold to stop monitoring (wide hysteresis)
+    // This prevents rapid cycling from small PID output variations
+    isHeating = (currentOutput >= (SAFETY_MIN_OUTPUT / 4));  // Changed from /2 to /4 for wider hysteresis
+  }
   
   // Detect start of heating
   if (isHeating && !safetyHeatingActive) {
     safetyHeatingActive = true;
     safetyHeatingStartTime = now;
     safetyInitialTemp = currentTemp;
-    safeSerialPrintf("SAFETY: Heating started - Initial temp: %.1f°C, Output: %u\n", 
-                     safetyInitialTemp, currentOutput);
+    safeSerialPrintf("SAFETY: Heating started - Initial temp: %.1f°C, Output: %u (threshold: %u)\n", 
+                     safetyInitialTemp, currentOutput, SAFETY_MIN_OUTPUT);
   }
   
   // Detect end of heating
   if (!isHeating && safetyHeatingActive) {
     safetyHeatingActive = false;
-    safeSerialPrintf("SAFETY: Heating stopped - Output dropped to %u\n", currentOutput);
+    safeSerialPrintf("SAFETY: Heating stopped - Output: %u (below threshold: %u)\n", 
+                     currentOutput, SAFETY_MIN_OUTPUT / 2);
   }
   
   // Perform safety checks every SAFETY_CHECK_INTERVAL
@@ -461,7 +562,7 @@ void eepromLoad(){
   float tmpCurrentLimit;
   EEPROM.get(ADDR_CURRENT_LIMIT, tmpCurrentLimit);
   if(tmpCurrentLimit < CUR_MIN || tmpCurrentLimit > CUR_MAX)
-    currentLimit = CUR_MAX;
+    currentLimit = CUR_MIN;  // Use CUR_MIN as default instead of CUR_MAX
   else
     currentLimit = tmpCurrentLimit;
   EEPROM.get(ADDR_CUR_OFFSET_CAL, curOffsetCal);
@@ -484,7 +585,7 @@ void eepromLoad(){
 
   if(!(wireDiam>=WIRE_MIN&&wireDiam<=WIRE_MAX))       wireDiam=0.5f;
   if(!(tempOffset>=OFF_MIN&&tempOffset<=OFF_MAX))     tempOffset=0.0f;
-  if(currentLimit<CUR_MIN||currentLimit>CUR_MAX)      currentLimit=0.50f;
+  if(currentLimit<CUR_MIN||currentLimit>CUR_MAX)      currentLimit=CUR_MIN;  // Use CUR_MIN instead of 0.50f
   if(curOffsetCal>32767)                              curOffsetCal=CUR_OFFSET_DEFAULT;
   
   // Update PID controller with loaded parameters
@@ -646,6 +747,10 @@ void setup(){
   }
   Serial.println("All screens setup complete");
   
+  // Initialize current limit display from G2 controller
+  Serial.println("Initializing current limit from G2...");
+  initCurrentLimitFromG2();
+  
   // Initialize idle timer
   lastActivityTime = millis();
   screensaverActive = false;
@@ -655,8 +760,7 @@ void setup(){
 }
 
 void loop(){
-  Serial.print("GPIO5 state: ");
-  Serial.println(digitalRead(5));
+  // Removed GPIO5 state check for cleaner operation
   // Removed blocking delay for smooth UI and telemetry
   // Full loop with LVGL timer handling and telemetry
   static uint32_t lastTick = 0, lastTele = 0, lastPrint = 0;
@@ -740,6 +844,21 @@ void loop(){
     updateDelayedEepromSave(); // Handle delayed EEPROM saves
   }
   
+  // Ensure continuous temperature reading every 100ms regardless of other systems
+  static uint32_t lastTempRead = 0;
+  if (now - lastTempRead >= 100) {
+    lastTempRead = now;
+    
+    // Debug: Track temperature reading calls
+    static uint32_t tempReadCount = 0;
+    tempReadCount++;
+    if (tempReadCount % 10 == 0) {  // Every 10th call (every second)
+      safeSerialPrintf("TEMP READ: Call #%lu at %lums\n", tempReadCount, now);
+    }
+    
+    readNanoTemp();  // This will handle its own 250ms request timing and update global cache
+  }
+  
   // Update autotune if active
   if (autotuneActive) {
     updatePIDAutotune();
@@ -755,23 +874,84 @@ void loop(){
   // Motor control logic
   uint16_t hotWireOutput = 0;
   
+  // Debug: Monitor setpoint changes
+  static double lastLoggedSetpoint = -999.0;
+  if (temperatureSetpoint != lastLoggedSetpoint) {
+    safeSerialPrintf("SETPOINT CHANGE: %.1f°C -> %.1f°C, PID enabled: %s\n", 
+                     lastLoggedSetpoint, temperatureSetpoint, pidEnabled ? "YES" : "NO");
+    lastLoggedSetpoint = temperatureSetpoint;
+  }
+  
   // Priority: PID control > RC control > Manual control
   if (pidEnabled && temperatureSetpoint > 0) {
     // PID control mode - use temperature control
     if (now - lastPidUpdateTime >= PID_UPDATE_INTERVAL) {
       lastPidUpdateTime = now;
-      float currentTemp = readNanoTemp();
-      // Validate temperature reading before using in PID
-      if (!isnan(currentTemp) && currentTemp >= 0.0 && currentTemp <= 1024.0) {
+      float currentTemp = getCachedTemp();  // Use cached temperature for faster access
+      
+      // Debug: Log PID temperature reading
+      static uint32_t lastPidTempLog = 0;
+      if (now - lastPidTempLog >= 1000) {  // Log every second
+        lastPidTempLog = now;
+        safeSerialPrintf("PID: Reading temp=%.2f°C, setpoint=%.1f°C, enabled=%s\n", 
+                         currentTemp, temperatureSetpoint, pidEnabled ? "YES" : "NO");
+      }
+      
+      // Enhanced validation - check for reasonable temperature values
+      bool validForPID = true;
+      if (isnan(currentTemp)) {
+        validForPID = false;
+        safeSerialPrintln("PID: Temperature is NaN - skipping PID update");
+      } else if (currentTemp < 0.0 || currentTemp > 500.0) {
+        validForPID = false;
+        safeSerialPrintf("PID: Temperature %.2f°C out of reasonable range (0-500°C) - skipping PID update\n", currentTemp);
+      } else {
+        // Check cache age - don't use stale data
+        uint32_t cacheAge = (now >= lastTempUpdateTime) ? (now - lastTempUpdateTime) : 0;
+        if (cacheAge > 2000) {  // 2 second timeout
+          validForPID = false;
+          safeSerialPrintf("PID: Temperature cache too old (%lums) - skipping PID update\n", cacheAge);
+        }
+      }
+      
+      if (validForPID) {
         temperatureInput = currentTemp;
         tempPID.Compute();
         hotWireOutput = (uint16_t)outputPWM;
+        
+        // Debug: Log PID computation details
+        static uint32_t lastPidComputeLog = 0;
+        if (now - lastPidComputeLog >= 2000) {  // Log every 2 seconds
+          lastPidComputeLog = now;
+          safeSerialPrintf("PID COMPUTE: Input=%.2f°C, Setpoint=%.1f°C, Output=%.1f (raw), HotWire=%u\n", 
+                           temperatureInput, temperatureSetpoint, outputPWM, hotWireOutput);
+          safeSerialPrintf("PID PARAMS: Kp=%.2f, Ki=%.3f, Kd=%.2f, Mode=%s\n", 
+                           pidKp, pidKi, pidKd, tempPID.GetMode() == AUTOMATIC ? "AUTO" : "MANUAL");
+        }
+        
+        // Reset invalid reading counter on successful reading
+        static int invalidReadingCount = 0;
+        invalidReadingCount = 0;
       } else {
-        // Invalid temperature - disable PID temporarily and turn off heater
-        safeSerialPrintf("Invalid temperature for PID: %.1f°C - disabling heater\n", currentTemp);
-        hotWireOutput = 0;
-        pidEnabled = false;  // Disable PID until valid reading
+        // Count consecutive invalid readings before disabling PID
+        static int invalidReadingCount = 0;
+        invalidReadingCount++;
+        
+        if (invalidReadingCount >= 10) {  // Disable after 10 consecutive invalid readings (500ms)
+          safeSerialPrintf("Too many invalid temperature readings - disabling PID (count: %d)\n", invalidReadingCount);
+          hotWireOutput = 0;
+          pidEnabled = false;  // Disable PID until valid reading
+          invalidReadingCount = 0;  // Reset counter
+        } else {
+          // Keep last valid hotWireOutput for brief invalid readings
+          hotWireOutput = (uint16_t)outputPWM;
+          safeSerialPrintf("Invalid temperature reading %d/10 - continuing with last PID output %u\n", 
+                          invalidReadingCount, hotWireOutput);
+        }
       }
+    } else {
+      // PID enabled but not time to update yet - keep last PID output
+      hotWireOutput = (uint16_t)outputPWM;
     }
   } else if (!overrideMode) {
     // RC control mode (only when not in override)
@@ -792,17 +972,46 @@ void loop(){
   }
   
   // Safety monitoring - check if heater is working properly
-  float currentTemp = readNanoTemp();
+  // Use the cached temperature reading for consistent data
+  float currentTemp = getCachedTemp();
+  
+  // Debug: Log safety monitoring input values
+  static uint32_t lastSafetyDebug = 0;
+  if (now - lastSafetyDebug >= 1000) {  // Log every second
+    lastSafetyDebug = now;
+    safeSerialPrintf("SAFETY INPUT: hotWireOutput=%u, temp=%.2f°C, active=%s\n", 
+                     hotWireOutput, currentTemp, safetyHeatingActive ? "YES" : "NO");
+  }
+  
   updateSafetyMonitoring(hotWireOutput, currentTemp);
   
   // Apply safety shutdown if error detected
   if (safetyErrorState) {
+    static uint32_t lastSafetyLog = 0;
+    if (now - lastSafetyLog >= 500) {  // Log every 500ms when safety active (more frequent)
+      lastSafetyLog = now;
+      safeSerialPrintf("🚨 SAFETY SHUTDOWN ACTIVE: hotWireOutput %u->0, PID disabled\n", hotWireOutput);
+      safeSerialPrintf("🚨 SAFETY ERROR: %s\n", safetyErrorMessage.c_str());
+      safeSerialPrintln("🚨 USE RESET BUTTON TO CLEAR SAFETY ERROR!");
+    }
     hotWireOutput = 0;  // Emergency shutdown
     pidEnabled = false; // Disable PID control
   }
   
   // Send hot wire command
   sendPololuHotWireForward(hotWireOutput);
+  
+  // Debug: Log actual power output periodically
+  static uint32_t lastPowerLog = 0;
+  if (now - lastPowerLog >= 3000) {  // Log every 3 seconds
+    lastPowerLog = now;
+    safeSerialPrintf("POWER OUTPUT: Sending %u to G2 controller (%.1f%%), PID=%s, Override=%s, Setpoint=%.1f°C\n", 
+                     hotWireOutput, (hotWireOutput/3200.0f)*100.0f, 
+                     pidEnabled ? "ON" : "OFF", overrideMode ? "ON" : "OFF", temperatureSetpoint);
+    safeSerialPrintf("CURRENT LIMIT: %.1f A (%.1f%% of max %.1f A), Safety=%s\n", 
+                     currentLimit, (currentLimit/CUR_MAX)*100.0f, CUR_MAX,
+                     safetyErrorState ? "ERROR" : "OK");
+  }
   
   // Now check if screensaver should start (after hotWireOutput is determined)
   // Prevent screensaver if ANY of these conditions are true:
@@ -946,20 +1155,34 @@ void sendPololuSetCurrentLimit(float selector_A) {
     Wire.write(f, 5);
     Wire.endTransmission();
 
-    // --- Read back the set current limit (register 42) and update the settings page ---
+    // Read back the set current limit (register 42) to verify and update global variable
     delay(10); // Short delay to allow the controller to process the command
     uint16_t raw = readG2(42); // 42 (0x2A) = Current limit setting register
 
     // Reverse Pololu formula: internal units -> milliamps
     float mA = (((((float)raw * 65536.0f) / 3200.0f) - offset_cal) * CURRENT_SCALE_CAL) / 2.0f / 3200.0f;
-    float set_current = mA / 1000.0f;
-
-    // Update the settings page label if it exists
-    if (lblSetCurrent) {
-        char buf[18];
-        snprintf(buf, sizeof(buf), "%.1f A", set_current);
+    float actualCurrentLimit = mA / 1000.0f;
+    
+    // Update the global currentLimit variable with the actual value from G2
+    currentLimit = actualCurrentLimit;
+    
+    // Update the settings page label if it exists (but only when not actively being pressed)
+    // This prevents overwriting immediate UI feedback from button presses
+    static uint32_t lastButtonUpdate = 0;
+    static uint32_t buttonUpdateDelay = 500; // 500ms delay after button press
+    uint32_t now = millis();
+    
+    if (now - lastButtonUpdate > buttonUpdateDelay && lblSetCurrent) {
+        char buf[32];
+        snprintf(buf, sizeof(buf), "Current Limit: %.1f A", actualCurrentLimit);
         lv_label_set_text(lblSetCurrent, buf);
+        safeSerialPrintf("UI updated with G2 readback: %.1f A\n", actualCurrentLimit);
+    } else {
+        safeSerialPrintf("G2 readback: %.1f A (UI update skipped)\n", actualCurrentLimit);
     }
+    
+    // This function is called from button handlers, so mark the time
+    lastButtonUpdate = now;
 }
 
 uint32_t readRCPulse(){
@@ -1001,6 +1224,33 @@ void scheduleEepromSave() {
   lastEepromSaveTime = millis();
 }
 
+// Function to read current limit from G2 and update UI on startup
+void initCurrentLimitFromG2() {
+    if (!lblSetCurrent) return; // UI not ready yet
+    
+    safeSerialPrintln("Reading current limit from G2 controller...");
+    
+    // Read current limit setting register
+    uint16_t raw = readG2(42); // 42 (0x2A) = Current limit setting register
+    
+    // Use the actual offset calibration
+    float offset_cal = (float)curOffsetCal;
+    
+    // Reverse Pololu formula: internal units -> milliamps
+    float mA = (((((float)raw * 65536.0f) / 3200.0f) - offset_cal) * CURRENT_SCALE_CAL) / 2.0f / 3200.0f;
+    float actualCurrentLimit = mA / 1000.0f;
+    
+    // Update global variable and UI
+    currentLimit = actualCurrentLimit;
+    
+    if (lblSetCurrent) {
+        char buf[32];
+        snprintf(buf, sizeof(buf), "Current Limit: %.1f A", actualCurrentLimit);
+        lv_label_set_text(lblSetCurrent, buf);
+        safeSerialPrintf("Current limit initialized from G2: %.1f A\n", actualCurrentLimit);
+    }
+}
+
 //------------------------------------------------------------------------------
 // PID Autotuning Functions
 
@@ -1013,6 +1263,9 @@ void startPIDAutotune(float setpoint, float outputStep) {
   }
   
   safeSerialPrintln("Starting PID Autotune...");
+  
+  // Set the global temperature setpoint so the system knows the target
+  temperatureSetpoint = setpoint;
   
   autotuneActive = true;
   autotuneState = 1; // running
@@ -1027,12 +1280,19 @@ void startPIDAutotune(float setpoint, float outputStep) {
   autotuneKu = 0.0;
   autotunePu = 0.0;
   
-  // Disable normal PID control
+  // Disable safety monitoring during autotune to prevent false alarms
+  // Autotune uses relay control (on/off) which can trigger safety errors
+  safetySystemEnabled = false;
+  clearSafetyError(); // Clear any existing safety errors
+  safeSerialPrintln("Autotune: Safety monitoring disabled during autotune");
+  
+  // Disable normal PID control during autotune
   pidEnabled = false;
   overrideMode = true; // Use manual control for autotune
   
   safeSerialPrintf("Autotune: Setpoint=%.1f°C, Output=%.1f%%, StartTemp=%.1f°C\n", 
                    setpoint, outputStep, currentTemp);
+  safeSerialPrintf("Autotune: Global temperature setpoint updated to %.1f°C\n", temperatureSetpoint);
 }
 
 void updatePIDAutotune() {
@@ -1048,6 +1308,9 @@ void updatePIDAutotune() {
     autotuneActive = false;
     overrideMode = false;
     manualPWM = 0;
+    // Re-enable safety monitoring if autotune aborts
+    safetySystemEnabled = true;
+    safeSerialPrintln("Autotune: Safety monitoring re-enabled after abort");
     return;
   }
   
@@ -1057,7 +1320,9 @@ void updatePIDAutotune() {
     autotuneActive = false;
     overrideMode = false;
     manualPWM = 0;
-    safeSerialPrintln("Autotune: Timeout - Failed");
+    // Re-enable safety monitoring if autotune times out
+    safetySystemEnabled = true;
+    safeSerialPrintln("Autotune: Timeout - Failed, safety monitoring re-enabled");
     return;
   }
   
@@ -1171,6 +1436,14 @@ void finishPIDAutotune() {
   overrideMode = false;
   manualPWM = 0;
 
+  // Re-enable safety monitoring after autotune completes
+  safetySystemEnabled = true;
+  safeSerialPrintln("Autotune: Safety monitoring re-enabled after autotune completion");
+
+  // Preserve the autotune setpoint for continued PID control
+  float preservedSetpoint = autotuneSetpoint;  // Keep the target temperature from autotune
+  safeSerialPrintf("Autotune: Preserving setpoint %.1f°C for continued PID control\n", preservedSetpoint);
+
   // Fallback to default PID settings if autotune failed
   if (autotuneState != 2) {
     safeSerialPrintln("Autotune: Failed - applying fallback default PID settings");
@@ -1188,6 +1461,24 @@ void finishPIDAutotune() {
   } else {
     // Save new parameters to EEPROM
     eepromSave();
+  }
+  
+  // Enable PID control after autotune completes (successful or failed)
+  // User requested: Turn off power output when autotune completes
+  temperatureSetpoint = 0.0;  // Set setpoint to 0 to disable PID control
+  pidEnabled = false;          // Disable PID control
+  safeSerialPrintf("Autotune: Completed - PID disabled, setpoint set to 0°C, power output OFF\n");
+  safeSerialPrintf("Autotune: New PID parameters saved. Enable PID manually when ready.\n");
+  
+  // Update PID status display if on PID tuning screen
+  if (lblPidStatus) {
+    if (autotuneState == 2) {
+      lv_label_set_text(lblPidStatus, "Status: Complete - PID OFF");
+      lv_obj_set_style_text_color(lblPidStatus, lv_color_hex(0x00FF00), 0);
+    } else {
+      lv_label_set_text(lblPidStatus, "Status: Failed - PID OFF");
+      lv_obj_set_style_text_color(lblPidStatus, lv_color_hex(0xFF4444), 0);
+    }
   }
 }
 
