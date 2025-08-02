@@ -226,7 +226,7 @@ void buildOverrideScreen() {
         safeSerialPrintln("CRITICAL ERROR: Failed to create lblOverridePowerOutput!");
         return;
     }
-    lv_label_set_text(lblOverridePowerOutput, "0 (0.0%)");
+    lv_label_set_text(lblOverridePowerOutput, "0.0%");
     lv_obj_align(lblOverridePowerOutput, LV_ALIGN_TOP_MID, 0, 50);
     lv_obj_set_style_text_color(lblOverridePowerOutput, lv_color_hex(0xFFFFFF), 0);
 
@@ -327,7 +327,7 @@ void buildOverrideScreen() {
         // Update display immediately
         if (lblManualPower) {
             char powerBuf[16];
-            sprintf(powerBuf, "%u (%.1f%%)", manualPWM, (manualPWM/3200.0f)*100.0f);
+            sprintf(powerBuf, "%.1f%%", (manualPWM/3200.0f)*100.0f);
             lv_label_set_text(lblManualPower, powerBuf);
         }
         
@@ -337,7 +337,7 @@ void buildOverrideScreen() {
     // Manual power display
     lblManualPower = lv_label_create(scrOverride);
     char powerBuf[16];
-    sprintf(powerBuf, "%u (%.1f%%)", manualPWM, (manualPWM/3200.0f)*100.0f);
+    sprintf(powerBuf, "%.1f%%", (manualPWM/3200.0f)*100.0f);
     lv_label_set_text(lblManualPower, powerBuf);
     lv_obj_align(lblManualPower, LV_ALIGN_CENTER, 0, 60);
     lv_obj_set_style_text_color(lblManualPower, lv_color_hex(0xFF6666), 0);
@@ -357,7 +357,7 @@ void buildOverrideScreen() {
         // Update display immediately
         if (lblManualPower) {
             char powerBuf[16];
-            sprintf(powerBuf, "%u (%.1f%%)", manualPWM, (manualPWM/3200.0f)*100.0f);
+            sprintf(powerBuf, "%.1f%%", (manualPWM/3200.0f)*100.0f);
             lv_label_set_text(lblManualPower, powerBuf);
         }
         
@@ -395,7 +395,7 @@ void buildOverrideScreen() {
             lv_label_set_text(lblSliderVal, "0.0 C");
         }
         if (lblManualPower) {
-            lv_label_set_text(lblManualPower, "0 (0.0%)");
+            lv_label_set_text(lblManualPower, "0.0%");
         }
         safeSerialPrintln("EMERGENCY STOP: All power systems disabled");
     }, LV_EVENT_CLICKED, nullptr);
@@ -1147,9 +1147,9 @@ void updateTelemetry() {
     sprintf(buffer, "%.1f C", (float)temperatureSetpoint);
     lv_label_set_text(lblVal[1], buffer);
     
-    // Show current PWM output (from PID, RC, or manual)
+    // Show current PWM output as percentage (from PID, RC, or manual)
     uint16_t currentPWM = overrideMode ? manualPWM : (uint16_t)outputPWM;
-    sprintf(buffer, "%.0f", (float)currentPWM);
+    sprintf(buffer, "%.1f%%", (currentPWM/3200.0f)*100.0f);
     lv_label_set_text(lblVal[2], buffer);
     
     sprintf(buffer, "%.2f A", actualCurrent);  // Show actual current from G2
@@ -1312,15 +1312,15 @@ void updateOverrideScreen() {
         
         if (overrideMode) {
             currentPower = manualPWM;
-            sprintf(buf, "%u (%.1f%%)", currentPower, (currentPower/3200.0f)*100.0f);
+            sprintf(buf, "%.1f%%", (currentPower/3200.0f)*100.0f);
         } else {
             uint32_t rcPulse = readRCPulse();
             if (rcPulse >= 900 && rcPulse <= 2100) {
                 currentPower = map(rcPulse, 1000, 2000, 0, 3200);
-                sprintf(buf, "%u (%.1f%%) RC", currentPower, (currentPower/3200.0f)*100.0f);
+                sprintf(buf, "%.1f%% RC", (currentPower/3200.0f)*100.0f);
             } else if (pidEnabled && temperatureSetpoint > 0) {
                 currentPower = (uint16_t)outputPWM;
-                sprintf(buf, "%u (%.1f%%) PID", currentPower, (currentPower/3200.0f)*100.0f);
+                sprintf(buf, "%.1f%% PID", (currentPower/3200.0f)*100.0f);
             } else {
                 currentPower = 0;
                 sprintf(buf, "OFF");
@@ -1358,7 +1358,7 @@ void updateOverrideScreen() {
     // Update manual power display
     if (lblManualPower) {
         char buf[16];
-        sprintf(buf, "%u (%.1f%%)", manualPWM, (manualPWM/3200.0f)*100.0f);
+        sprintf(buf, "%.1f%%", (manualPWM/3200.0f)*100.0f);
         lv_label_set_text(lblManualPower, buf);
         
         // Color code based on whether override mode is active

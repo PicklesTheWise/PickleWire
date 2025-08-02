@@ -535,15 +535,17 @@ void lvgl_touch_read(lv_indev_drv_t*, lv_indev_data_t* data){
 // Safe Serial Functions
 
 inline void safeSerialPrint(const char* msg) {
-  Serial.print(msg);
+  if (Serial) Serial.print(msg);
 }
 
 inline void safeSerialPrintln(const char* msg) {
-  Serial.println(msg);
+  if (Serial) Serial.println(msg);
 }
 
 // For formatted output
 void safeSerialPrintf(const char* format, ...) {
+  if (!Serial) return;  // Exit early if Serial not available
+  
   char buf[128];
   va_list args;
   va_start(args, format);
@@ -611,14 +613,31 @@ void eepromSave(){
 // setup & loop
 
 void setup(){
-  // Initialize Serial only - no USB.begin() to avoid boot loops
+  // Initialize LED for visual feedback
+  pinMode(LED_BUILTIN, OUTPUT);
+  
+  // Blink LED to show device is alive
+  for(int i = 0; i < 5; i++) {
+    digitalWrite(LED_BUILTIN, HIGH);
+    delay(200);
+    digitalWrite(LED_BUILTIN, LOW);
+    delay(200);
+  }
+  
+  // Initialize Serial with longer delay
   Serial.begin(115200);
+  delay(2000);  // Longer delay for USB enumeration
   
-  // Longer delay for system stabilization
-  delay(2000);
+  // Multiple attempts to establish serial
+  for(int i = 0; i < 10 && !Serial; i++) {
+    delay(100);
+    digitalWrite(LED_BUILTIN, HIGH);
+    delay(50);
+    digitalWrite(LED_BUILTIN, LOW);
+  }
   
-  // Don't wait for Serial to be connected
   Serial.println("PickleWire Hot Wire Cutter v2.40 starting...");
+  Serial.println("Device is alive and serial is working!");
   
   Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN, 400000);
 
@@ -676,79 +695,79 @@ void setup(){
   Serial.println("PID configured");
 
   // Skip LVGL and screen building for now to isolate the issue
-  Serial.println("Initializing LVGL...");
+  if (Serial) Serial.println("Initializing LVGL...");
   
   // Initialize LVGL
-  Serial.println("Starting LVGL init...");
+  if (Serial) Serial.println("Starting LVGL init...");
   lv_init();
-  Serial.println("LVGL lv_init() done");
+  if (Serial) Serial.println("LVGL lv_init() done");
   
   lv_disp_draw_buf_init(&draw_buf, buf1, buf2, LVGL_BUF_SIZE);
-  Serial.println("Display buffer init done");
+  if (Serial) Serial.println("Display buffer init done");
   
   lv_disp_drv_init(&disp_drv);
     disp_drv.hor_res=320; disp_drv.ver_res=240;
     disp_drv.draw_buf=&draw_buf; disp_drv.flush_cb=lvgl_flush_cb;
   lv_disp_drv_register(&disp_drv);
-  Serial.println("Display driver registered");
+  if (Serial) Serial.println("Display driver registered");
 
   lv_indev_drv_init(&indev_drv);
     indev_drv.type=LV_INDEV_TYPE_POINTER;
     indev_drv.read_cb=lvgl_touch_read;
   lv_indev_drv_register(&indev_drv);
-  Serial.println("LVGL initialized successfully");
+  if (Serial) Serial.println("LVGL initialized successfully");
 
   // Show splash screen while initializing
-  Serial.println("Displaying splash screen...");
+  if (Serial) Serial.println("Displaying splash screen...");
   showSplashScreen();
   delay(5000);  // Display splash for 5 seconds
 
   // Build all screens one by one with error checking
-  Serial.println("Building screens...");
+  if (Serial) Serial.println("Building screens...");
   
-  Serial.println("Building telemetry screen...");
+  if (Serial) Serial.println("Building telemetry screen...");
   buildTelemetryScreen();
   if (scrTelem == nullptr) {
-    Serial.println("CRITICAL ERROR: scrTelem is null after build!");
+    if (Serial) Serial.println("CRITICAL ERROR: scrTelem is null after build!");
   } else {
-    Serial.println("Telemetry screen built successfully");
+    if (Serial) Serial.println("Telemetry screen built successfully");
   }
   
-  Serial.println("Building override screen...");
+  if (Serial) Serial.println("Building override screen...");
   buildOverrideScreen();
   if (scrOverride == nullptr) {
-    Serial.println("CRITICAL ERROR: scrOverride is null after build!");
+    if (Serial) Serial.println("CRITICAL ERROR: scrOverride is null after build!");
   } else {
-    Serial.println("Override screen built successfully");
+    if (Serial) Serial.println("Override screen built successfully");
   }
   
-  Serial.println("Building settings screen...");
+  if (Serial) Serial.println("Building settings screen...");
   buildSettingsScreen();
   if (scrSettings == nullptr) {
-    Serial.println("CRITICAL ERROR: scrSettings is null after build!");
+    if (Serial) Serial.println("CRITICAL ERROR: scrSettings is null after build!");
   } else {
-    Serial.println("Settings screen built successfully");
+    if (Serial) Serial.println("Settings screen built successfully");
   }
   
-  Serial.println("Building PID tune screen...");
+  if (Serial) Serial.println("Building PID tune screen...");
   buildPIDTuneScreen();
   if (scrPIDTune == nullptr) {
-    Serial.println("CRITICAL ERROR: scrPIDTune is null after build!");
+    if (Serial) Serial.println("CRITICAL ERROR: scrPIDTune is null after build!");
   } else {
-    Serial.println("PID screen built successfully");
+    if (Serial) Serial.println("PID screen built successfully");
   }
   
-  Serial.println("Loading telemetry screen...");
+  if (Serial) Serial.println("Loading telemetry screen...");
   if (scrTelem != nullptr) {
     lv_scr_load(scrTelem);
-    Serial.println("Telemetry screen loaded successfully");
+    if (Serial) Serial.println("Telemetry screen loaded successfully");
   } else {
-    Serial.println("ERROR: scrTelem is null!");
+    if (Serial) Serial.println("ERROR: scrTelem is null!");
   }
-  Serial.println("All screens setup complete");
+  if (Serial) Serial.println("All screens setup complete");
   
   // Initialize current limit display from G2 controller
-  Serial.println("Initializing current limit from G2...");
+  if (Serial) Serial.println("Initializing current limit from G2...");
   initCurrentLimitFromG2();
   
   // Initialize idle timer
@@ -756,7 +775,7 @@ void setup(){
   screensaverActive = false;
   
   // Print startup message but don't wait for serial
-  Serial.println("PickleWire Hot Wire Cutter v2.40 started");
+  if (Serial) Serial.println("PickleWire Hot Wire Cutter v2.40 started");
 }
 
 void loop(){
@@ -1226,12 +1245,20 @@ void scheduleEepromSave() {
 
 // Function to read current limit from G2 and update UI on startup
 void initCurrentLimitFromG2() {
-    if (!lblSetCurrent) return; // UI not ready yet
+    if (!lblSetCurrent) {
+        safeSerialPrintln("WARNING: Current limit UI not ready, will update when available");
+        return; // UI not ready yet
+    }
     
     safeSerialPrintln("Reading current limit from G2 controller...");
     
     // Read current limit setting register
     uint16_t raw = readG2(42); // 42 (0x2A) = Current limit setting register
+    
+    if (raw == 0xFFFF) {
+        safeSerialPrintln("WARNING: Failed to read current limit from G2, using existing value");
+        return;
+    }
     
     // Use the actual offset calibration
     float offset_cal = (float)curOffsetCal;
@@ -1240,9 +1267,24 @@ void initCurrentLimitFromG2() {
     float mA = (((((float)raw * 65536.0f) / 3200.0f) - offset_cal) * CURRENT_SCALE_CAL) / 2.0f / 3200.0f;
     float actualCurrentLimit = mA / 1000.0f;
     
-    // Update global variable and UI
+    // Validate the read value
+    if (actualCurrentLimit < CUR_MIN || actualCurrentLimit > CUR_MAX) {
+        safeSerialPrintf("WARNING: G2 current limit %.2f A out of range (%.1f-%.1f A), using existing value\n", 
+                         actualCurrentLimit, CUR_MIN, CUR_MAX);
+        return;
+    }
+    
+    // Update global variable and save to EEPROM if different
+    float oldLimit = currentLimit;
     currentLimit = actualCurrentLimit;
     
+    if (abs(currentLimit - oldLimit) > 0.05f) { // Only save if significantly different
+        EEPROM.put(ADDR_CURRENT_LIMIT, currentLimit);
+        EEPROM.commit();
+        safeSerialPrintf("Current limit updated in EEPROM: %.1f A -> %.1f A\n", oldLimit, currentLimit);
+    }
+    
+    // Update UI display
     if (lblSetCurrent) {
         char buf[32];
         snprintf(buf, sizeof(buf), "Current Limit: %.1f A", actualCurrentLimit);
