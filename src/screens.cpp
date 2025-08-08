@@ -9,7 +9,7 @@
 #include <PID_v1.h>
 
 // Include any global variables you need from main.cpp as extern
-extern float wireDiam, tempOffset, currentLimit;
+extern float wireDiam, currentLimit;
 extern double pidKp, pidKi, pidKd;
 extern bool pidEnabled;
 extern bool overrideMode;
@@ -130,6 +130,13 @@ void buildTelemetryScreen() {
     lv_obj_align(lblErrorVal, LV_ALIGN_BOTTOM_MID, 0, -10);  // Moved to bottom center
     lv_obj_set_style_text_color(lblErrorVal, lv_color_hex(0xFF3333), 0);
     lv_obj_set_style_text_font(lblErrorVal, LV_FONT_DEFAULT, 0);
+
+    // G2 voltage display at bottom left
+    lblG2Voltage = lv_label_create(scrTelem);
+    lv_label_set_text(lblG2Voltage, "0.0V");
+    lv_obj_align(lblG2Voltage, LV_ALIGN_BOTTOM_LEFT, 5, -5);  // Bottom left corner with small margin
+    lv_obj_set_style_text_color(lblG2Voltage, lv_color_hex(0x888888), 0);  // Gray text
+    lv_obj_set_style_text_font(lblG2Voltage, LV_FONT_DEFAULT, 0);
 
     // Override navigation button
     btnNavOverride = lv_btn_create(scrTelem);
@@ -499,45 +506,18 @@ void buildSettingsScreen() {
     lv_obj_center(lblWireRight);
     lv_obj_set_style_text_color(lblWireRight, lv_color_hex(0xFFFFFF), 0);
 
-    // Temperature Offset Section
-    lblSetOffset = lv_label_create(container);
-    char offsetBuffer[32];
-    sprintf(offsetBuffer, "Temp Offset: %.1f C", tempOffset);
-    lv_label_set_text(lblSetOffset, offsetBuffer);
-    lv_obj_align(lblSetOffset, LV_ALIGN_TOP_LEFT, 0, 40);
-    lv_obj_set_style_text_font(lblSetOffset, LV_FONT_DEFAULT, 0);
-    lv_obj_set_style_text_color(lblSetOffset, lv_color_hex(0xFFFFFF), 0);
-
-    btnOffsetLeft = lv_btn_create(container);
-    lv_obj_set_size(btnOffsetLeft, 35, 25);
-    lv_obj_align(btnOffsetLeft, LV_ALIGN_TOP_RIGHT, -80, 40);
-    lv_obj_set_style_bg_color(btnOffsetLeft, lv_color_hex(0xFF4444), 0);
-    lv_obj_t *lblOffsetLeft = lv_label_create(btnOffsetLeft);
-    lv_label_set_text(lblOffsetLeft, "-");
-    lv_obj_center(lblOffsetLeft);
-    lv_obj_set_style_text_color(lblOffsetLeft, lv_color_hex(0xFFFFFF), 0);
-
-    btnOffsetRight = lv_btn_create(container);
-    lv_obj_set_size(btnOffsetRight, 35, 25);
-    lv_obj_align(btnOffsetRight, LV_ALIGN_TOP_RIGHT, -40, 40);
-    lv_obj_set_style_bg_color(btnOffsetRight, lv_color_hex(0x44FF44), 0);
-    lv_obj_t *lblOffsetRight = lv_label_create(btnOffsetRight);
-    lv_label_set_text(lblOffsetRight, "+");
-    lv_obj_center(lblOffsetRight);
-    lv_obj_set_style_text_color(lblOffsetRight, lv_color_hex(0xFFFFFF), 0);
-
     // Current Limit Section
     lblSetCurrent = lv_label_create(container);
     char currentBuffer[32];
     sprintf(currentBuffer, "Current Limit: %.1f A", currentLimit);
     lv_label_set_text(lblSetCurrent, currentBuffer);
-    lv_obj_align(lblSetCurrent, LV_ALIGN_TOP_LEFT, 0, 75);
+    lv_obj_align(lblSetCurrent, LV_ALIGN_TOP_LEFT, 0, 40);
     lv_obj_set_style_text_font(lblSetCurrent, LV_FONT_DEFAULT, 0);
     lv_obj_set_style_text_color(lblSetCurrent, lv_color_hex(0xFFFFFF), 0);
 
     btnCurrentLeft = lv_btn_create(container);
     lv_obj_set_size(btnCurrentLeft, 35, 25);
-    lv_obj_align(btnCurrentLeft, LV_ALIGN_TOP_RIGHT, -80, 75);
+    lv_obj_align(btnCurrentLeft, LV_ALIGN_TOP_RIGHT, -80, 40);
     lv_obj_set_style_bg_color(btnCurrentLeft, lv_color_hex(0xFF4444), 0);
     lv_obj_t *lblCurrentLeft = lv_label_create(btnCurrentLeft);
     lv_label_set_text(lblCurrentLeft, "-");
@@ -546,39 +526,66 @@ void buildSettingsScreen() {
 
     btnCurrentRight = lv_btn_create(container);
     lv_obj_set_size(btnCurrentRight, 35, 25);
-    lv_obj_align(btnCurrentRight, LV_ALIGN_TOP_RIGHT, -40, 75);
+    lv_obj_align(btnCurrentRight, LV_ALIGN_TOP_RIGHT, -40, 40);
     lv_obj_set_style_bg_color(btnCurrentRight, lv_color_hex(0x44FF44), 0);
     lv_obj_t *lblCurrentRight = lv_label_create(btnCurrentRight);
     lv_label_set_text(lblCurrentRight, "+");
     lv_obj_center(lblCurrentRight);
     lv_obj_set_style_text_color(lblCurrentRight, lv_color_hex(0xFFFFFF), 0);
 
-    // PID Kp Section
-    lblSetPidKp = lv_label_create(container);
-    char kpBuffer[32];
-    sprintf(kpBuffer, "PID Kp: %.1f", pidKp);
-    lv_label_set_text(lblSetPidKp, kpBuffer);
-    lv_obj_align(lblSetPidKp, LV_ALIGN_TOP_LEFT, 0, 110);
-    lv_obj_set_style_text_font(lblSetPidKp, LV_FONT_DEFAULT, 0);
-    lv_obj_set_style_text_color(lblSetPidKp, lv_color_hex(0xFFDD44), 0);
+    // RC Setpoint Min Section
+    lblSetRcMin = lv_label_create(container);
+    char rcMinBuffer[32];
+    sprintf(rcMinBuffer, "RC Min: %.0f°C", rcSetpointMin);
+    lv_label_set_text(lblSetRcMin, rcMinBuffer);
+    lv_obj_align(lblSetRcMin, LV_ALIGN_TOP_LEFT, 0, 75);
+    lv_obj_set_style_text_font(lblSetRcMin, LV_FONT_DEFAULT, 0);
+    lv_obj_set_style_text_color(lblSetRcMin, lv_color_hex(0xFFDD44), 0);
 
-    btnPidKpLeft = lv_btn_create(container);
-    lv_obj_set_size(btnPidKpLeft, 35, 25);
-    lv_obj_align(btnPidKpLeft, LV_ALIGN_TOP_RIGHT, -80, 110);
-    lv_obj_set_style_bg_color(btnPidKpLeft, lv_color_hex(0xFF4444), 0);
-    lv_obj_t *lblKpLeft = lv_label_create(btnPidKpLeft);
-    lv_label_set_text(lblKpLeft, "-");
-    lv_obj_center(lblKpLeft);
-    lv_obj_set_style_text_color(lblKpLeft, lv_color_hex(0xFFFFFF), 0);
+    btnRcMinLeft = lv_btn_create(container);
+    lv_obj_set_size(btnRcMinLeft, 35, 25);
+    lv_obj_align(btnRcMinLeft, LV_ALIGN_TOP_RIGHT, -80, 75);
+    lv_obj_set_style_bg_color(btnRcMinLeft, lv_color_hex(0xFF4444), 0);
+    lv_obj_t *lblRcMinLeft = lv_label_create(btnRcMinLeft);
+    lv_label_set_text(lblRcMinLeft, "-");
+    lv_obj_center(lblRcMinLeft);
+    lv_obj_set_style_text_color(lblRcMinLeft, lv_color_hex(0xFFFFFF), 0);
 
-    btnPidKpRight = lv_btn_create(container);
-    lv_obj_set_size(btnPidKpRight, 35, 25);
-    lv_obj_align(btnPidKpRight, LV_ALIGN_TOP_RIGHT, -40, 110);
-    lv_obj_set_style_bg_color(btnPidKpRight, lv_color_hex(0x44FF44), 0);
-    lv_obj_t *lblKpRight = lv_label_create(btnPidKpRight);
-    lv_label_set_text(lblKpRight, "+");
-    lv_obj_center(lblKpRight);
-    lv_obj_set_style_text_color(lblKpRight, lv_color_hex(0xFFFFFF), 0);
+    btnRcMinRight = lv_btn_create(container);
+    lv_obj_set_size(btnRcMinRight, 35, 25);
+    lv_obj_align(btnRcMinRight, LV_ALIGN_TOP_RIGHT, -40, 75);
+    lv_obj_set_style_bg_color(btnRcMinRight, lv_color_hex(0x44FF44), 0);
+    lv_obj_t *lblRcMinRight = lv_label_create(btnRcMinRight);
+    lv_label_set_text(lblRcMinRight, "+");
+    lv_obj_center(lblRcMinRight);
+    lv_obj_set_style_text_color(lblRcMinRight, lv_color_hex(0xFFFFFF), 0);
+
+    // RC Setpoint Max Section
+    lblSetRcMax = lv_label_create(container);
+    char rcMaxBuffer[32];
+    sprintf(rcMaxBuffer, "RC Max: %.0f°C", rcSetpointMax);
+    lv_label_set_text(lblSetRcMax, rcMaxBuffer);
+    lv_obj_align(lblSetRcMax, LV_ALIGN_TOP_LEFT, 0, 110);
+    lv_obj_set_style_text_font(lblSetRcMax, LV_FONT_DEFAULT, 0);
+    lv_obj_set_style_text_color(lblSetRcMax, lv_color_hex(0xFFDD44), 0);
+
+    btnRcMaxLeft = lv_btn_create(container);
+    lv_obj_set_size(btnRcMaxLeft, 35, 25);
+    lv_obj_align(btnRcMaxLeft, LV_ALIGN_TOP_RIGHT, -80, 110);
+    lv_obj_set_style_bg_color(btnRcMaxLeft, lv_color_hex(0xFF4444), 0);
+    lv_obj_t *lblRcMaxLeft = lv_label_create(btnRcMaxLeft);
+    lv_label_set_text(lblRcMaxLeft, "-");
+    lv_obj_center(lblRcMaxLeft);
+    lv_obj_set_style_text_color(lblRcMaxLeft, lv_color_hex(0xFFFFFF), 0);
+
+    btnRcMaxRight = lv_btn_create(container);
+    lv_obj_set_size(btnRcMaxRight, 35, 25);
+    lv_obj_align(btnRcMaxRight, LV_ALIGN_TOP_RIGHT, -40, 110);
+    lv_obj_set_style_bg_color(btnRcMaxRight, lv_color_hex(0x44FF44), 0);
+    lv_obj_t *lblRcMaxRight = lv_label_create(btnRcMaxRight);
+    lv_label_set_text(lblRcMaxRight, "+");
+    lv_obj_center(lblRcMaxRight);
+    lv_obj_set_style_text_color(lblRcMaxRight, lv_color_hex(0xFFFFFF), 0);
 
     // Navigation and control buttons
     lv_obj_t *btnBack = lv_btn_create(scrSettings);
@@ -650,56 +657,6 @@ void buildSettingsScreen() {
         scheduleEepromSave();
     }, LV_EVENT_LONG_PRESSED_REPEAT, nullptr);
 
-    lv_obj_add_event_cb(btnOffsetLeft, [](lv_event_t* e) {
-        lv_event_code_t code = lv_event_get_code(e);
-        float step = (code == LV_EVENT_LONG_PRESSED_REPEAT) ? OFF_STEP * 10 : OFF_STEP;
-        tempOffset -= step;
-        if (tempOffset < OFF_MIN) tempOffset = OFF_MIN;
-        if (lblSetOffset) {
-            char buffer[32];
-            sprintf(buffer, "Temp Offset: %.1f C", tempOffset);
-            lv_label_set_text(lblSetOffset, buffer);
-        }
-        scheduleEepromSave();
-    }, LV_EVENT_CLICKED, nullptr);
-    lv_obj_add_event_cb(btnOffsetLeft, [](lv_event_t* e) {
-        lv_event_code_t code = lv_event_get_code(e);
-        float step = (code == LV_EVENT_LONG_PRESSED_REPEAT) ? OFF_STEP * 10 : OFF_STEP;
-        tempOffset -= step;
-        if (tempOffset < OFF_MIN) tempOffset = OFF_MIN;
-        if (lblSetOffset) {
-            char buffer[32];
-            sprintf(buffer, "Temp Offset: %.1f C", tempOffset);
-            lv_label_set_text(lblSetOffset, buffer);
-        }
-        scheduleEepromSave();
-    }, LV_EVENT_LONG_PRESSED_REPEAT, nullptr);
-
-    lv_obj_add_event_cb(btnOffsetRight, [](lv_event_t* e) {
-        lv_event_code_t code = lv_event_get_code(e);
-        float step = (code == LV_EVENT_LONG_PRESSED_REPEAT) ? OFF_STEP * 10 : OFF_STEP;
-        tempOffset += step;
-        if (tempOffset > OFF_MAX) tempOffset = OFF_MAX;
-        if (lblSetOffset) {
-            char buffer[32];
-            sprintf(buffer, "Temp Offset: %.1f C", tempOffset);
-            lv_label_set_text(lblSetOffset, buffer);
-        }
-        scheduleEepromSave();
-    }, LV_EVENT_CLICKED, nullptr);
-    lv_obj_add_event_cb(btnOffsetRight, [](lv_event_t* e) {
-        lv_event_code_t code = lv_event_get_code(e);
-        float step = (code == LV_EVENT_LONG_PRESSED_REPEAT) ? OFF_STEP * 10 : OFF_STEP;
-        tempOffset += step;
-        if (tempOffset > OFF_MAX) tempOffset = OFF_MAX;
-        if (lblSetOffset) {
-            char buffer[32];
-            sprintf(buffer, "Temp Offset: %.1f C", tempOffset);
-            lv_label_set_text(lblSetOffset, buffer);
-        }
-        scheduleEepromSave();
-    }, LV_EVENT_LONG_PRESSED_REPEAT, nullptr);
-
     lv_obj_add_event_cb(btnCurrentLeft, [](lv_event_t* e) {
         lv_event_code_t code = lv_event_get_code(e);
         float step = (code == LV_EVENT_LONG_PRESSED_REPEAT) ? CUR_STEP * 5 : CUR_STEP;
@@ -772,50 +729,79 @@ void buildSettingsScreen() {
         scheduleEepromSave();
     }, LV_EVENT_LONG_PRESSED_REPEAT, nullptr);
 
-    // PID Kp adjustment
-    lv_obj_add_event_cb(btnPidKpLeft, [](lv_event_t* e) {
-        lv_event_code_t code = lv_event_get_code(e);
-        float step = (code == LV_EVENT_LONG_PRESSED_REPEAT) ? 5.0f : 1.0f;
-        pidKp -= step;
-        if (pidKp < 0.1f) pidKp = 0.1f;
-        tempPID.SetTunings(pidKp, pidKi, pidKd);
+    // RC Min adjustment
+    lv_obj_add_event_cb(btnRcMinLeft, [](lv_event_t* e) {
+        rcSetpointMin -= 10.0f;
+        if (rcSetpointMin < 50.0f) rcSetpointMin = 50.0f;
+        if (rcSetpointMin >= rcSetpointMax) rcSetpointMin = rcSetpointMax - 10.0f;
         char buffer[32];
-        sprintf(buffer, "PID Kp: %.1f", pidKp);
-        lv_label_set_text(lblSetPidKp, buffer);
+        sprintf(buffer, "RC Min: %.0f°C", rcSetpointMin);
+        lv_label_set_text(lblSetRcMin, buffer);
         scheduleEepromSave();
     }, LV_EVENT_CLICKED, nullptr);
-    lv_obj_add_event_cb(btnPidKpLeft, [](lv_event_t* e) {
-        lv_event_code_t code = lv_event_get_code(e);
-        float step = (code == LV_EVENT_LONG_PRESSED_REPEAT) ? 5.0f : 1.0f;
-        pidKp -= step;
-        if (pidKp < 0.1f) pidKp = 0.1f;
-        tempPID.SetTunings(pidKp, pidKi, pidKd);
+    lv_obj_add_event_cb(btnRcMinLeft, [](lv_event_t* e) {
+        rcSetpointMin -= 10.0f;
+        if (rcSetpointMin < 50.0f) rcSetpointMin = 50.0f;
+        if (rcSetpointMin >= rcSetpointMax) rcSetpointMin = rcSetpointMax - 10.0f;
         char buffer[32];
-        sprintf(buffer, "PID Kp: %.1f", pidKp);
-        lv_label_set_text(lblSetPidKp, buffer);
+        sprintf(buffer, "RC Min: %.0f°C", rcSetpointMin);
+        lv_label_set_text(lblSetRcMin, buffer);
         scheduleEepromSave();
     }, LV_EVENT_LONG_PRESSED_REPEAT, nullptr);
 
-    lv_obj_add_event_cb(btnPidKpRight, [](lv_event_t* e) {
-        lv_event_code_t code = lv_event_get_code(e);
-        float step = (code == LV_EVENT_LONG_PRESSED_REPEAT) ? 5.0f : 1.0f;
-        pidKp += step;
-        if (pidKp > 100.0f) pidKp = 100.0f;
-        tempPID.SetTunings(pidKp, pidKi, pidKd);
+    lv_obj_add_event_cb(btnRcMinRight, [](lv_event_t* e) {
+        rcSetpointMin += 10.0f;
+        if (rcSetpointMin >= rcSetpointMax) rcSetpointMin = rcSetpointMax - 10.0f;
+        if (rcSetpointMin > 300.0f) rcSetpointMin = 300.0f;
         char buffer[32];
-        sprintf(buffer, "PID Kp: %.1f", pidKp);
-        lv_label_set_text(lblSetPidKp, buffer);
+        sprintf(buffer, "RC Min: %.0f°C", rcSetpointMin);
+        lv_label_set_text(lblSetRcMin, buffer);
         scheduleEepromSave();
     }, LV_EVENT_CLICKED, nullptr);
-    lv_obj_add_event_cb(btnPidKpRight, [](lv_event_t* e) {
-        lv_event_code_t code = lv_event_get_code(e);
-        float step = (code == LV_EVENT_LONG_PRESSED_REPEAT) ? 5.0f : 1.0f;
-        pidKp += step;
-        if (pidKp > 100.0f) pidKp = 100.0f;
-        tempPID.SetTunings(pidKp, pidKi, pidKd);
+    lv_obj_add_event_cb(btnRcMinRight, [](lv_event_t* e) {
+        rcSetpointMin += 10.0f;
+        if (rcSetpointMin >= rcSetpointMax) rcSetpointMin = rcSetpointMax - 10.0f;
+        if (rcSetpointMin > 300.0f) rcSetpointMin = 300.0f;
         char buffer[32];
-        sprintf(buffer, "PID Kp: %.1f", pidKp);
-        lv_label_set_text(lblSetPidKp, buffer);
+        sprintf(buffer, "RC Min: %.0f°C", rcSetpointMin);
+        lv_label_set_text(lblSetRcMin, buffer);
+        scheduleEepromSave();
+    }, LV_EVENT_LONG_PRESSED_REPEAT, nullptr);
+
+    // RC Max adjustment
+    lv_obj_add_event_cb(btnRcMaxLeft, [](lv_event_t* e) {
+        rcSetpointMax -= 10.0f;
+        if (rcSetpointMax <= rcSetpointMin) rcSetpointMax = rcSetpointMin + 10.0f;
+        if (rcSetpointMax < 150.0f) rcSetpointMax = 150.0f;
+        char buffer[32];
+        sprintf(buffer, "RC Max: %.0f°C", rcSetpointMax);
+        lv_label_set_text(lblSetRcMax, buffer);
+        scheduleEepromSave();
+    }, LV_EVENT_CLICKED, nullptr);
+    lv_obj_add_event_cb(btnRcMaxLeft, [](lv_event_t* e) {
+        rcSetpointMax -= 10.0f;
+        if (rcSetpointMax <= rcSetpointMin) rcSetpointMax = rcSetpointMin + 10.0f;
+        if (rcSetpointMax < 150.0f) rcSetpointMax = 150.0f;
+        char buffer[32];
+        sprintf(buffer, "RC Max: %.0f°C", rcSetpointMax);
+        lv_label_set_text(lblSetRcMax, buffer);
+        scheduleEepromSave();
+    }, LV_EVENT_LONG_PRESSED_REPEAT, nullptr);
+
+    lv_obj_add_event_cb(btnRcMaxRight, [](lv_event_t* e) {
+        rcSetpointMax += 10.0f;
+        if (rcSetpointMax > 500.0f) rcSetpointMax = 500.0f;
+        char buffer[32];
+        sprintf(buffer, "RC Max: %.0f°C", rcSetpointMax);
+        lv_label_set_text(lblSetRcMax, buffer);
+        scheduleEepromSave();
+    }, LV_EVENT_CLICKED, nullptr);
+    lv_obj_add_event_cb(btnRcMaxRight, [](lv_event_t* e) {
+        rcSetpointMax += 10.0f;
+        if (rcSetpointMax > 500.0f) rcSetpointMax = 500.0f;
+        char buffer[32];
+        sprintf(buffer, "RC Max: %.0f°C", rcSetpointMax);
+        lv_label_set_text(lblSetRcMax, buffer);
         scheduleEepromSave();
     }, LV_EVENT_LONG_PRESSED_REPEAT, nullptr);
 
@@ -1209,8 +1195,22 @@ void updateTelemetry() {
         lv_label_set_text(lblBanner, buffer);
     }
     
-    // Update PID tune screen if active
-    updatePIDTuneStatus();
+    // Update G2 voltage display
+    if (lblG2Voltage) {
+        uint16_t voltageRaw = readG2(23);  // Register 23: Input voltage in millivolts
+        float voltage = voltageRaw / 1000.0f;
+        sprintf(buffer, "%.1fV", voltage);
+        lv_label_set_text(lblG2Voltage, buffer);
+        
+        // Color code voltage status: red < 12V, yellow 12-14V, green > 14V
+        if (voltage < 12.0f) {
+            lv_obj_set_style_text_color(lblG2Voltage, lv_color_hex(0xFF3333), 0);  // Red - low voltage
+        } else if (voltage < 14.0f) {
+            lv_obj_set_style_text_color(lblG2Voltage, lv_color_hex(0xFFAA00), 0);  // Orange - marginal voltage
+        } else {
+            lv_obj_set_style_text_color(lblG2Voltage, lv_color_hex(0x00FF00), 0);  // Green - good voltage
+        }
+    }
 }
 
 // Update override screen with live data

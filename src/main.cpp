@@ -45,7 +45,9 @@
 #define ADDR_PID_KP           16   // float
 #define ADDR_PID_KI           20   // float
 #define ADDR_PID_KD           24   // float
-#define EEPROM_SIZE           28
+#define ADDR_RC_SETPOINT_MIN  28   // float
+#define ADDR_RC_SETPOINT_MAX  32   // float
+#define EEPROM_SIZE           36
 
 // Settings ranges
 float    WIRE_MIN    = 0.1f;
@@ -87,9 +89,18 @@ float    tempOffset    = 0.0f;     // °C
 float    currentLimit  = 1.0f;    // Amps (set default to min or as desired)
 uint16_t curOffsetCal  = CUR_OFFSET_DEFAULT;
 
+// RC Setpoint Range Settings
+float    rcSetpointMin = 100.0f;   // Minimum setpoint (°C) - bottom of RC range
+float    rcSetpointMax = 350.0f;   // Maximum setpoint (°C) - top of RC range
+
 // RC pulse width (ISR)
 volatile uint32_t rc_width    = 0;
 volatile uint32_t rc_pulse_start = 0;
+
+// RC control state tracking
+bool rcWasActive = false;              // True if RC was previously controlling the system
+uint32_t lastValidRCTime = 0;          // Last time we had a valid RC signal
+#define RC_TIMEOUT_MS 500              // Consider RC disconnected after 500ms without signal
 
 // System control modes
 bool overrideMode = false;          // True when in manual override mode
@@ -162,6 +173,7 @@ void updateDelayedEepromSave();
 void scheduleEepromSave();
 void initCurrentLimitFromG2();
 void buildPIDTuneScreen();
+void updatePIDTuneStatus();
 void startPIDAutotune(float setpoint, float outputStep);
 void updatePIDAutotune();
 void finishPIDAutotune();
@@ -218,15 +230,15 @@ lv_obj_t *btnOverride = nullptr, *btnSettings = nullptr, *btnBack = nullptr, *bt
 lv_obj_t *lblTitle[4] = {nullptr}, *lblVal[4] = {nullptr}, *lblBanner = nullptr, *chartTemp = nullptr, *lblErrorVal = nullptr;
 lv_chart_series_t *serTemp = nullptr;
 lv_chart_series_t *serSetpoint = nullptr;  // Series for setpoint line
+lv_obj_t *lblG2Voltage = nullptr;  // G2 voltage display label
 lv_obj_t *lblOverrideTemp = nullptr, *lblOverrideRCPulse = nullptr, *lblOverrideModeStatus = nullptr, *lblOverrideTempSetpoint = nullptr, *lblOverridePowerOutput = nullptr, *lblSliderVal = nullptr;
 lv_obj_t *lblManualPower = nullptr;  // Manual power display label
 lv_obj_t *btnPidEnable = nullptr;    // PID enable/disable button
 lv_obj_t *btnTempDown = nullptr, *btnTempUp = nullptr, *lblTempDown = nullptr, *lblTempUp = nullptr;
 lv_obj_t *lblSetWire = nullptr, *btnWireLeft = nullptr, *btnWireRight = nullptr;
-lv_obj_t *lblSetOffset = nullptr, *btnOffsetLeft = nullptr, *btnOffsetRight = nullptr;
 lv_obj_t *lblSetCurrent = nullptr, *btnCurrentLeft = nullptr, *btnCurrentRight = nullptr;
-lv_obj_t *btnPidKpLeft = nullptr, *btnPidKpRight = nullptr, *btnPidKiLeft = nullptr, *btnPidKiRight = nullptr, *btnPidKdLeft = nullptr, *btnPidKdRight = nullptr;
-lv_obj_t *lblSetPidKp = nullptr, *lblSetPidKi = nullptr, *lblSetPidKd = nullptr;
+lv_obj_t *btnRcMinLeft = nullptr, *btnRcMinRight = nullptr, *btnRcMaxLeft = nullptr, *btnRcMaxRight = nullptr, *btnPidKpLeft = nullptr, *btnPidKpRight = nullptr, *btnPidKiLeft = nullptr, *btnPidKiRight = nullptr, *btnPidKdLeft = nullptr, *btnPidKdRight = nullptr;
+lv_obj_t *lblSetRcMin = nullptr, *lblSetRcMax = nullptr, *lblSetPidKp = nullptr, *lblSetPidKi = nullptr, *lblSetPidKd = nullptr;
 lv_obj_t *btnPidTune = nullptr, *btnSettingsNav = nullptr;
 lv_obj_t *lblPidStatus = nullptr;  // Added PID status label
 
@@ -278,27 +290,49 @@ float readNanoTemp() {
     static String tempLine = "";
     static float lastTempC = NAN;
     static uint32_t lastRequestTime = 0;
+    static uint32_t lastResponseTime = 0;
+    static uint32_t consecutiveRequestsWithoutResponse = 0;
+    
     // Non-blocking: send request every call, parse response if available
     uint32_t now = millis();
-    // Send request every 250ms (or as needed)
-    if (now - lastRequestTime > 250) {
+    
+    // Send request every 250ms, or more frequently if communication is failing
+    uint32_t requestInterval = 250;
+    if (consecutiveRequestsWithoutResponse > 5) {
+        requestInterval = 100;  // More frequent requests if communication failing
+    }
+    
+    if (now - lastRequestTime > requestInterval) {
         NanoSerial.write('R');
         lastRequestTime = now;
+        consecutiveRequestsWithoutResponse++;
         
-        // Debug: Track request sending
+        // Debug: Track request sending with failure info
         static uint32_t requestCount = 0;
         requestCount++;
-        safeSerialPrintf("UART REQ: Sent request #%lu at %lums\n", requestCount, now);
+        if (consecutiveRequestsWithoutResponse > 3) {
+            safeSerialPrintf("UART REQ: Sent request #%lu at %lums (NO RESPONSE for %lu requests, %lums ago)\n", 
+                             requestCount, now, consecutiveRequestsWithoutResponse, 
+                             (lastResponseTime > 0) ? (now - lastResponseTime) : 0);
+        } else {
+            safeSerialPrintf("UART REQ: Sent request #%lu at %lums\n", requestCount, now);
+        }
     }
+    
     // Parse any available response
     while (NanoSerial.available()) {
         char c = NanoSerial.read();
         if (c == '\n' || c == '\r') {
             if (tempLine.length() > 0) {
+                lastResponseTime = now;
+                consecutiveRequestsWithoutResponse = 0;  // Reset failure counter
+                
                 int idx = tempLine.indexOf(":");
                 String valStr = (idx >= 0) ? tempLine.substring(idx + 1) : tempLine;
                 valStr.trim();
                 float newTempC = valStr.toFloat();
+                
+                safeSerialPrintf("UART RESPONSE: Received '%s' -> %.2f°C\n", tempLine.c_str(), newTempC);
                 
                 // Validate temperature reading - reject obviously invalid values
                 bool isValidReading = true;
@@ -575,15 +609,44 @@ void eepromLoad(){
   EEPROM.get(ADDR_PID_KI, tempKi);
   EEPROM.get(ADDR_PID_KD, tempKd);
   
+  safeSerialPrintf("EEPROM PID: Raw values - Kp=%.3f, Ki=%.3f, Kd=%.3f\n", tempKp, tempKi, tempKd);
+  
   // Validate PID parameters
-  if(isnan(tempKp) || tempKp <= 0 || tempKp > 100) tempKp = 8.0;
-  if(isnan(tempKi) || tempKi < 0 || tempKi > 10) tempKi = 0.2;
-  if(isnan(tempKd) || tempKd < 0 || tempKd > 50) tempKd = 2.0;
+  if(isnan(tempKp) || tempKp <= 0 || tempKp > 100) {
+    safeSerialPrintf("EEPROM PID: Kp %.3f invalid, using default 8.0\n", tempKp);
+    tempKp = 8.0;
+  }
+  if(isnan(tempKi) || tempKi < 0 || tempKi > 10) {
+    safeSerialPrintf("EEPROM PID: Ki %.3f invalid, using default 0.2\n", tempKi);
+    tempKi = 0.2;
+  }
+  if(isnan(tempKd) || tempKd < 0 || tempKd > 50) {
+    safeSerialPrintf("EEPROM PID: Kd %.3f invalid, using default 2.0\n", tempKd);
+    tempKd = 2.0;
+  }
   
   // Apply validated parameters
   pidKp = tempKp;
   pidKi = tempKi;
   pidKd = tempKd;
+  
+  safeSerialPrintf("EEPROM PID: Final values - Kp=%.3f, Ki=%.3f, Kd=%.3f\n", pidKp, pidKi, pidKd);
+
+  // Load RC setpoint range settings
+  float tempRcMin, tempRcMax;
+  EEPROM.get(ADDR_RC_SETPOINT_MIN, tempRcMin);
+  EEPROM.get(ADDR_RC_SETPOINT_MAX, tempRcMax);
+  
+  // Validate RC range settings
+  if(isnan(tempRcMin) || tempRcMin < 50.0f || tempRcMin > 300.0f) tempRcMin = 100.0f;
+  if(isnan(tempRcMax) || tempRcMax < 150.0f || tempRcMax > 500.0f) tempRcMax = 350.0f;
+  if(tempRcMax <= tempRcMin) {
+    tempRcMin = 100.0f;
+    tempRcMax = 350.0f;
+  }
+  
+  rcSetpointMin = tempRcMin;
+  rcSetpointMax = tempRcMax;
 
   if(!(wireDiam>=WIRE_MIN&&wireDiam<=WIRE_MAX))       wireDiam=0.5f;
   if(!(tempOffset>=OFF_MIN&&tempOffset<=OFF_MAX))     tempOffset=0.0f;
@@ -591,7 +654,9 @@ void eepromLoad(){
   if(curOffsetCal>32767)                              curOffsetCal=CUR_OFFSET_DEFAULT;
   
   // Update PID controller with loaded parameters
+  safeSerialPrintf("Applying PID tunings: Kp=%.3f, Ki=%.3f, Kd=%.3f\n", pidKp, pidKi, pidKd);
   tempPID.SetTunings(pidKp, pidKi, pidKd);
+  safeSerialPrintln("PID tunings applied successfully");
 }
 
 void eepromSave(){
@@ -604,6 +669,10 @@ void eepromSave(){
   EEPROM.put(ADDR_PID_KP, pidKp);
   EEPROM.put(ADDR_PID_KI, pidKi);
   EEPROM.put(ADDR_PID_KD, pidKd);
+  
+  // Save RC setpoint range settings
+  EEPROM.put(ADDR_RC_SETPOINT_MIN, rcSetpointMin);
+  EEPROM.put(ADDR_RC_SETPOINT_MAX, rcSetpointMax);
   
   EEPROM.commit();
   sendPololuSetCurrentLimit(currentLimit);
@@ -653,6 +722,11 @@ void setup(){
   Serial.println("Setting up RC input...");
   pinMode(RC_INPUT_PIN, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(RC_INPUT_PIN), rcPulseISR, CHANGE);
+  
+  // Initialize RC state tracking
+  rcWasActive = false;
+  lastValidRCTime = millis();
+  
   Serial.println("RC input configured with interrupt");
 
   Serial.println("Setting up display power...");
@@ -791,9 +865,16 @@ void loop(){
     lastWatchdog = now;
     size_t freeHeap = ESP.getFreeHeap();
     size_t minFreeHeap = ESP.getMinFreeHeap();
+    
+    // Check UART communication health
+    uint32_t tempCacheAge = (now >= lastTempUpdateTime) ? (now - lastTempUpdateTime) : 0;
+    bool uartHealthy = tempCacheAge < 5000;  // Consider unhealthy if no response in 5 seconds
+    
     safeSerialPrintf("WATCHDOG: Free heap: %lu bytes (min: %lu), Override: %s, Screens: T=%p O=%p S=%p P=%p\n", 
                      freeHeap, minFreeHeap, overrideMode ? "ON" : "OFF", 
                      scrTelem, scrOverride, scrSettings, scrPIDTune);
+    safeSerialPrintf("UART HEALTH: Temperature cache age: %lums, Status: %s, Last temp: %.2f°C\n",
+                     tempCacheAge, uartHealthy ? "HEALTHY" : "⚠️ STALE", globalTemperatureC);
 
     // Add Pololu G2 input voltage debug
     debugPrintG2Voltage();
@@ -801,6 +882,12 @@ void loop(){
     // Alert if memory is getting low
     if (freeHeap < 10000) {
       safeSerialPrintln("WARNING: Low memory detected!");
+    }
+    
+    // Alert if UART communication is failing
+    if (!uartHealthy) {
+      safeSerialPrintln("⚠️ WARNING: UART temperature communication appears to be failing!");
+      safeSerialPrintln("⚠️ Check Nano connection on GPIO43/44 and power supply");
     }
   }
   
@@ -860,6 +947,11 @@ void loop(){
       updateOverrideScreen();  // Update override screen live data
     }
     
+    // Update PID tune screen if it's the active screen
+    if (scrPIDTune != nullptr && lv_scr_act() == scrPIDTune) {
+      updatePIDTuneStatus();  // Update PID tune screen live data
+    }
+    
     updateDelayedEepromSave(); // Handle delayed EEPROM saves
   }
   
@@ -901,7 +993,74 @@ void loop(){
     lastLoggedSetpoint = temperatureSetpoint;
   }
   
-  // Priority: PID control > RC control > Manual control
+  // FIRST: Process RC input to update setpoint (when not in override mode)
+  if (!overrideMode) {
+    uint32_t rcPulse = readRCPulse();
+    
+    // Check if we have a valid RC signal
+    bool hasValidRC = (rcPulse >= 1000 && rcPulse <= 2100);
+    
+    if (hasValidRC) {
+      // Valid RC signal - update timestamp and process normally
+      lastValidRCTime = now;
+      
+      // Constrain RC pulse to valid range
+      if (rcPulse > 2000) rcPulse = 2000;
+      
+      // Apply deadband at bottom 5% to prevent jitters at low throttle
+      uint32_t deadbandThreshold = 1000 + ((2000 - 1000) * 0.05); // 5% deadband = 1050µs
+      double newSetpoint;
+      
+      if (rcPulse <= deadbandThreshold) {
+        // In deadband - turn off system
+        newSetpoint = 0.0;
+      } else {
+        // Above deadband - map to full range
+        // Map from deadband threshold to 2000µs -> rcSetpointMin to rcSetpointMax
+        newSetpoint = map(rcPulse, deadbandThreshold, 2000, rcSetpointMin, rcSetpointMax);
+      }
+      
+      // Always update setpoint to track RC input properly
+      if (newSetpoint != temperatureSetpoint) {
+        temperatureSetpoint = newSetpoint;
+        safeSerialPrintf("RC SETPOINT: RC=%luµs -> %.1f°C (range: %.0f-%.0f°C)\n", 
+                         rcPulse, temperatureSetpoint, rcSetpointMin, rcSetpointMax);
+      }
+      
+      // Mark RC as active if we're controlling temperature
+      if (temperatureSetpoint > 0.0) {
+        rcWasActive = true;
+      }
+      
+      // Automatically enable PID when RC setpoint > 0 (out of deadband)
+      if (temperatureSetpoint > 0.0 && !pidEnabled) {
+        pidEnabled = true;
+        safeSerialPrintln("RC: Auto-enabled PID for temperature control");
+      } else if (temperatureSetpoint <= 0.0 && pidEnabled) {
+        pidEnabled = false;
+        safeSerialPrintln("RC: Auto-disabled PID (in deadband)");
+      }
+    } else {
+      // No valid RC signal - check if this is a disconnection during operation
+      uint32_t timeSinceLastRC = (now >= lastValidRCTime) ? (now - lastValidRCTime) : 0;
+      
+      if (rcWasActive && timeSinceLastRC > RC_TIMEOUT_MS) {
+        // RC disconnection detected during active operation - treat as error
+        safeSerialPrintf("🚨 RC DISCONNECTION ERROR: RC was controlling system but signal lost for %lums\n", timeSinceLastRC);
+        safeSerialPrintf("🚨 RC DISCONNECT: Forcing emergency shutdown - Setpoint: %.1f°C -> 0°C, PID: ON -> OFF\n", temperatureSetpoint);
+        
+        // Emergency shutdown
+        temperatureSetpoint = 0.0;
+        pidEnabled = false;
+        rcWasActive = false;  // Clear the flag
+        
+        safeSerialPrintln("🚨 RC DISCONNECT: System disabled due to RC disconnection during operation");
+      }
+      // If RC was never active, don't interfere with manual control
+    }
+  }
+  
+  // SECOND: Control output based on current mode and setpoint
   if (pidEnabled && temperatureSetpoint > 0) {
     // PID control mode - use temperature control
     if (now - lastPidUpdateTime >= PID_UPDATE_INTERVAL) {
@@ -927,7 +1086,7 @@ void loop(){
       } else {
         // Check cache age - don't use stale data
         uint32_t cacheAge = (now >= lastTempUpdateTime) ? (now - lastTempUpdateTime) : 0;
-        if (cacheAge > 2000) {  // 2 second timeout
+        if (cacheAge > 10000) {  // 10 second timeout (increased from 2 seconds)
           validForPID = false;
           safeSerialPrintf("PID: Temperature cache too old (%lums) - skipping PID update\n", cacheAge);
         }
@@ -956,7 +1115,7 @@ void loop(){
         static int invalidReadingCount = 0;
         invalidReadingCount++;
         
-        if (invalidReadingCount >= 10) {  // Disable after 10 consecutive invalid readings (500ms)
+        if (invalidReadingCount >= 50) {  // Disable after 50 consecutive invalid readings (2.5 seconds) - increased from 10
           safeSerialPrintf("Too many invalid temperature readings - disabling PID (count: %d)\n", invalidReadingCount);
           hotWireOutput = 0;
           pidEnabled = false;  // Disable PID until valid reading
@@ -964,7 +1123,7 @@ void loop(){
         } else {
           // Keep last valid hotWireOutput for brief invalid readings
           hotWireOutput = (uint16_t)outputPWM;
-          safeSerialPrintf("Invalid temperature reading %d/10 - continuing with last PID output %u\n", 
+          safeSerialPrintf("Invalid temperature reading %d/50 - continuing with last PID output %u\n", 
                           invalidReadingCount, hotWireOutput);
         }
       }
@@ -972,22 +1131,26 @@ void loop(){
       // PID enabled but not time to update yet - keep last PID output
       hotWireOutput = (uint16_t)outputPWM;
     }
-  } else if (!overrideMode) {
-    // RC control mode (only when not in override)
-    uint32_t rcPulse = readRCPulse();
+  } else if (temperatureSetpoint > 0 && !pidEnabled) {
+    // Check if we should re-enable PID when temperature communication recovers
+    float currentTemp = getCachedTemp();
+    uint32_t cacheAge = (now >= lastTempUpdateTime) ? (now - lastTempUpdateTime) : 0;
+    bool tempCommRecovered = !isnan(currentTemp) && (cacheAge < 5000) && 
+                             (currentTemp >= 0.0 && currentTemp <= 500.0);
     
-    // Valid RC signal is typically 1000-2000 microseconds
-    if (rcPulse >= 900 && rcPulse <= 2100) {
-      // Map RC pulse to hot wire output (1000-2000µs -> 0-3200)
-      if (rcPulse < 1000) rcPulse = 1000;
-      if (rcPulse > 2000) rcPulse = 2000;
-      hotWireOutput = map(rcPulse, 1000, 2000, 0, 3200);
+    if (tempCommRecovered) {
+      pidEnabled = true;
+      safeSerialPrintf("PID AUTO-RECOVERY: Re-enabled PID (temp=%.2f°C, cache_age=%lums)\n", 
+                       currentTemp, cacheAge);
     } else {
-      hotWireOutput = 0;  // No RC signal - hot wire off
+      hotWireOutput = 0;  // Keep output off until communication recovers
     }
-  } else {
+  } else if (overrideMode) {
     // Manual override mode - use manual PWM value
     hotWireOutput = manualPWM;
+  } else {
+    // No PID, no override - hot wire off
+    hotWireOutput = 0;
   }
   
   // Safety monitoring - check if heater is working properly
@@ -1024,9 +1187,26 @@ void loop(){
   static uint32_t lastPowerLog = 0;
   if (now - lastPowerLog >= 3000) {  // Log every 3 seconds
     lastPowerLog = now;
+    uint32_t rcPulse = readRCPulse();
+    bool hasActiveRC = (rcPulse >= 1000 && rcPulse <= 2100);
+    
+    // Calculate what the RC setpoint would be for debugging
+    float rcSetpoint = 0.0;
+    if (hasActiveRC) {
+      uint32_t deadbandThreshold = 1000 + ((2000 - 1000) * 0.05); // 5% deadband = 1050µs
+      if (rcPulse <= deadbandThreshold) {
+        rcSetpoint = 0.0;  // In deadband
+      } else {
+        rcSetpoint = map(rcPulse, deadbandThreshold, 2000, rcSetpointMin, rcSetpointMax);
+      }
+    }
+    
     safeSerialPrintf("POWER OUTPUT: Sending %u to G2 controller (%.1f%%), PID=%s, Override=%s, Setpoint=%.1f°C\n", 
                      hotWireOutput, (hotWireOutput/3200.0f)*100.0f, 
                      pidEnabled ? "ON" : "OFF", overrideMode ? "ON" : "OFF", temperatureSetpoint);
+    safeSerialPrintf("RC CONTROL: Pulse=%luµs (%s), Mapped_Setpoint=%.1f°C (range: %.0f-%.0f°C)\n", 
+                     rcPulse, hasActiveRC ? "ACTIVE" : "inactive", 
+                     rcSetpoint, rcSetpointMin, rcSetpointMax);
     safeSerialPrintf("CURRENT LIMIT: %.1f A (%.1f%% of max %.1f A), Safety=%s\n", 
                      currentLimit, (currentLimit/CUR_MAX)*100.0f, CUR_MAX,
                      safetyErrorState ? "ERROR" : "OK");
@@ -1041,7 +1221,7 @@ void loop(){
   if (!screensaverActive && (now >= lastActivityTime) && (now - lastActivityTime >= IDLE_TIMEOUT_MS)) {
     // Check for any active control systems that should prevent screensaver
     uint32_t rcPulse = readRCPulse();
-    bool hasActiveRC = (rcPulse >= 900 && rcPulse <= 2100);
+    bool hasActiveRC = (rcPulse >= 1000 && rcPulse <= 2100);
     bool systemActive = (hotWireOutput > 0) || pidEnabled || overrideMode || hasActiveRC;
     
     if (!systemActive) {
@@ -1071,7 +1251,7 @@ void loop(){
     lastIdleDebug = now;
     uint32_t idleTime = (now >= lastActivityTime) ? (now - lastActivityTime) : 0; // Prevent overflow
     uint32_t rcPulse = readRCPulse();
-    bool hasActiveRC = (rcPulse >= 900 && rcPulse <= 2100);
+    bool hasActiveRC = (rcPulse >= 1000 && rcPulse <= 2100);
     bool systemActive = (hotWireOutput > 0) || pidEnabled || overrideMode || hasActiveRC;
     
     safeSerialPrintf("IDLE DEBUG: Time since activity: %lums (timeout: %dms), Screensaver: %s\n", 
@@ -1084,8 +1264,20 @@ void loop(){
   // Print "alive" message every 10 seconds (less frequent now)
   if (now - lastPrint >= 10000) {
     lastPrint = now;
-    safeSerialPrintf("System operational - Override: %s, RC: %luµs, HotWire: %u\n", 
-                     overrideMode ? "ON" : "OFF", readRCPulse(), hotWireOutput);
+    uint32_t rcPulse = readRCPulse();
+    bool hasActiveRC = (rcPulse >= 1000 && rcPulse <= 2100);
+    float rcSetpoint = 0.0;
+    if (hasActiveRC) {
+      uint32_t deadbandThreshold = 1000 + ((2000 - 1000) * 0.05); // 5% deadband = 1050µs
+      if (rcPulse <= deadbandThreshold) {
+        rcSetpoint = 0.0;  // In deadband
+      } else {
+        rcSetpoint = map(rcPulse, deadbandThreshold, 2000, rcSetpointMin, rcSetpointMax);
+      }
+    }
+    safeSerialPrintf("System operational - Override: %s, RC_Setpoint: %.1f°C (%luµs), PID: %s, HotWire: %u\n", 
+                     overrideMode ? "ON" : "OFF", rcSetpoint, rcPulse, 
+                     pidEnabled ? "ON" : "OFF", hotWireOutput);
   }
   
   delay(10);  // Small delay
@@ -1106,9 +1298,9 @@ uint16_t readG2(uint8_t id){
   return value;
 }
 
-// Debug: Read and print Pololu G2 input voltage (register 0x24)
+// Debug: Read and print Pololu G2 input voltage (register 23)
 void debugPrintG2Voltage() {
-    uint16_t raw = readG2(0x24); // Register 0x24: Input voltage in millivolts
+    uint16_t raw = readG2(23); // Register 23: Input voltage in millivolts
     float voltage = raw / 1000.0f;
     safeSerialPrintf("G2 I2C: Input voltage: %.3f V (raw: %u mV)\n", voltage, raw);
 }

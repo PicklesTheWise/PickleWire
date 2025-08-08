@@ -7,7 +7,7 @@ float readMax6675Temp();
 // Extern UI objects (so both main.cpp and screens.cpp can access them)
 extern lv_obj_t *scrTelem, *scrOverride, *scrSettings, *scrPIDTune;
 extern lv_obj_t *btnNavOverride, *btnNavSettings;  // Navigation buttons
-extern lv_obj_t *lblSetWire, *lblSetOffset, *lblSetCurrent;
+extern lv_obj_t *lblSetWire, *lblSetCurrent;
 extern lv_obj_t *lblOverrideTemp, *lblOverrideRCPulse, *lblOverrideModeStatus, *lblSliderVal;  // Removed slider, kept label for temp display
 extern lv_obj_t *lblOverridePowerOutput;   // Current power output label for override screen
 extern lv_obj_t *lblManualPower;           // Manual power display label for override screen
@@ -16,10 +16,11 @@ extern lv_obj_t *btnPidEnable;             // PID enable/disable button for over
 extern lv_obj_t *lblPidStatus;
 extern lv_obj_t *lblChartMin, *lblChartMax;
 extern lv_obj_t *lblTitle[4], *lblVal[4], *lblBanner, *lblErrorVal;
-extern lv_obj_t *btnWireLeft, *btnWireRight, *btnOffsetLeft, *btnOffsetRight;
+extern lv_obj_t *lblG2Voltage;  // G2 voltage display label
+extern lv_obj_t *btnWireLeft, *btnWireRight;
 extern lv_obj_t *btnCurrentLeft, *btnCurrentRight;
-extern lv_obj_t *btnPidKpLeft, *btnPidKpRight, *btnPidKiLeft, *btnPidKiRight, *btnPidKdLeft, *btnPidKdRight;
-extern lv_obj_t *lblSetPidKp, *lblSetPidKi, *lblSetPidKd;
+extern lv_obj_t *btnRcMinLeft, *btnRcMinRight, *btnRcMaxLeft, *btnRcMaxRight, *btnPidKpLeft, *btnPidKpRight, *btnPidKiLeft, *btnPidKiRight, *btnPidKdLeft, *btnPidKdRight;
+extern lv_obj_t *lblSetRcMin, *lblSetRcMax, *lblSetPidKp, *lblSetPidKi, *lblSetPidKd;
 extern lv_obj_t *btnPidTune, *btnSettingsNav;
 extern lv_chart_series_t *serTemp;
 extern lv_chart_series_t *serSetpoint;  // Series for setpoint line
@@ -27,6 +28,7 @@ extern lv_obj_t *chartTemp;
 
 // Shared variables
 extern float wireDiam, tempOffset, currentLimit;
+extern float rcSetpointMin, rcSetpointMax;  // RC setpoint range settings
 extern double pidKp, pidKi, pidKd;
 extern bool pidEnabled;
 extern PID tempPID;
