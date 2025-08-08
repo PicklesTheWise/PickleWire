@@ -47,7 +47,8 @@
 #define ADDR_PID_KD           24   // float
 #define ADDR_RC_SETPOINT_MIN  28   // float
 #define ADDR_RC_SETPOINT_MAX  32   // float
-#define EEPROM_SIZE           36
+#define ADDR_AUTOTUNE_TARGET  36   // float (new)
+#define EEPROM_SIZE           40
 
 // Settings ranges
 float    WIRE_MIN    = 0.1f;
@@ -111,6 +112,8 @@ bool autotuneActive = false;       // True when autotune is running
 uint32_t autotuneStartTime = 0;    // When autotune started
 float autotuneSetpoint = 0.0;      // Target temperature for autotune
 float autotuneOutput = 0.0;        // Output level for autotune (0-100%)
+// Default autotune target temperature for UI selection
+float autotuneTargetTemp = 250.0f;
 
 // Safety monitoring system
 #define SAFETY_CHECK_INTERVAL     5000    // Check every 5 seconds (was 2 seconds)
@@ -230,6 +233,10 @@ lv_obj_t *btnOverride = nullptr, *btnSettings = nullptr, *btnBack = nullptr, *bt
 lv_obj_t *lblTitle[4] = {nullptr}, *lblVal[4] = {nullptr}, *lblBanner = nullptr, *chartTemp = nullptr, *lblErrorVal = nullptr;
 lv_chart_series_t *serTemp = nullptr;
 lv_chart_series_t *serSetpoint = nullptr;  // Series for setpoint line
+// Mini chart for PID tune screen
+lv_obj_t *miniChart = nullptr;
+lv_chart_series_t *miniSerTemp = nullptr;
+lv_chart_series_t *miniSerSetpoint = nullptr;
 lv_obj_t *lblG2Voltage = nullptr;  // G2 voltage display label
 lv_obj_t *lblOverrideTemp = nullptr, *lblOverrideRCPulse = nullptr, *lblOverrideModeStatus = nullptr, *lblOverrideTempSetpoint = nullptr, *lblOverridePowerOutput = nullptr, *lblSliderVal = nullptr;
 lv_obj_t *lblManualPower = nullptr;  // Manual power display label
@@ -253,6 +260,7 @@ float chartTempMin = 0.0f, chartTempMax = 500.0f;
 // Add these declarations with other UI objects
 lv_obj_t *scrPIDTune = nullptr;
 lv_obj_t *lblKpVal = nullptr, *lblKiVal = nullptr, *lblKdVal = nullptr;
+lv_obj_t *lblAutoTarget = nullptr;  // Autotune target label
 
 // Navigation deferral to prevent concurrent LVGL operations
 bool pendingNavigation = false;
@@ -593,6 +601,7 @@ void safeSerialPrintf(const char* format, ...) {
 
 void eepromLoad(){
   EEPROM.begin(EEPROM_SIZE);
+  bool needsRewrite = false; // If we detect invalid/corrupt values, rewrite EEPROM once
   EEPROM.get(ADDR_WIRE_DIAM,   wireDiam);
   EEPROM.get(ADDR_TEMP_OFFSET, tempOffset);
   float tmpCurrentLimit;
@@ -615,14 +624,17 @@ void eepromLoad(){
   if(isnan(tempKp) || tempKp <= 0 || tempKp > 100) {
     safeSerialPrintf("EEPROM PID: Kp %.3f invalid, using default 8.0\n", tempKp);
     tempKp = 8.0;
+    needsRewrite = true;
   }
-  if(isnan(tempKi) || tempKi < 0 || tempKi > 10) {
+  if(isnan(tempKi) || tempKi <= 0 || tempKi > 10) {
     safeSerialPrintf("EEPROM PID: Ki %.3f invalid, using default 0.2\n", tempKi);
     tempKi = 0.2;
+    needsRewrite = true;
   }
-  if(isnan(tempKd) || tempKd < 0 || tempKd > 50) {
+  if(isnan(tempKd) || tempKd <= 0 || tempKd > 50) {
     safeSerialPrintf("EEPROM PID: Kd %.3f invalid, using default 2.0\n", tempKd);
     tempKd = 2.0;
+    needsRewrite = true;
   }
   
   // Apply validated parameters
@@ -638,15 +650,26 @@ void eepromLoad(){
   EEPROM.get(ADDR_RC_SETPOINT_MAX, tempRcMax);
   
   // Validate RC range settings
-  if(isnan(tempRcMin) || tempRcMin < 50.0f || tempRcMin > 300.0f) tempRcMin = 100.0f;
-  if(isnan(tempRcMax) || tempRcMax < 150.0f || tempRcMax > 500.0f) tempRcMax = 350.0f;
+  if(isnan(tempRcMin) || tempRcMin < 50.0f || tempRcMin > 300.0f) { tempRcMin = 100.0f; needsRewrite = true; }
+  if(isnan(tempRcMax) || tempRcMax < 150.0f || tempRcMax > 500.0f) { tempRcMax = 350.0f; needsRewrite = true; }
   if(tempRcMax <= tempRcMin) {
     tempRcMin = 100.0f;
     tempRcMax = 350.0f;
+    needsRewrite = true;
   }
   
   rcSetpointMin = tempRcMin;
   rcSetpointMax = tempRcMax;
+
+  // Load Autotune target temperature
+  float tempAutoTarget;
+  EEPROM.get(ADDR_AUTOTUNE_TARGET, tempAutoTarget);
+  if (isnan(tempAutoTarget) || tempAutoTarget < 150.0f || tempAutoTarget > 350.0f) {
+    safeSerialPrintf("EEPROM: Autotune target %.1f invalid, using default 250\n", tempAutoTarget);
+    tempAutoTarget = 250.0f;
+    needsRewrite = true;
+  }
+  autotuneTargetTemp = tempAutoTarget;
 
   if(!(wireDiam>=WIRE_MIN&&wireDiam<=WIRE_MAX))       wireDiam=0.5f;
   if(!(tempOffset>=OFF_MIN&&tempOffset<=OFF_MAX))     tempOffset=0.0f;
@@ -657,6 +680,12 @@ void eepromLoad(){
   safeSerialPrintf("Applying PID tunings: Kp=%.3f, Ki=%.3f, Kd=%.3f\n", pidKp, pidKi, pidKd);
   tempPID.SetTunings(pidKp, pidKi, pidKd);
   safeSerialPrintln("PID tunings applied successfully");
+
+  // If anything looked corrupt/invalid and we replaced it, rewrite EEPROM once
+  if (needsRewrite) {
+    safeSerialPrintln("EEPROM normalization: Detected invalid values, rewriting with defaults/current settings");
+    eepromSave();
+  }
 }
 
 void eepromSave(){
@@ -666,13 +695,22 @@ void eepromSave(){
   EEPROM.put(ADDR_CUR_OFFSET_CAL,curOffsetCal);
   
   // Save PID parameters
-  EEPROM.put(ADDR_PID_KP, pidKp);
-  EEPROM.put(ADDR_PID_KI, pidKi);
-  EEPROM.put(ADDR_PID_KD, pidKd);
+  // NOTE: pidKp/pidKi/pidKd are doubles in RAM but stored as 4-byte floats in EEPROM.
+  // Writing doubles would consume 8 bytes and corrupt adjacent addresses.
+  {
+    float fKp = (float)pidKp;
+    float fKi = (float)pidKi;
+    float fKd = (float)pidKd;
+    EEPROM.put(ADDR_PID_KP, fKp);
+    EEPROM.put(ADDR_PID_KI, fKi);
+    EEPROM.put(ADDR_PID_KD, fKd);
+  }
   
   // Save RC setpoint range settings
   EEPROM.put(ADDR_RC_SETPOINT_MIN, rcSetpointMin);
   EEPROM.put(ADDR_RC_SETPOINT_MAX, rcSetpointMax);
+  // Save Autotune target
+  EEPROM.put(ADDR_AUTOTUNE_TARGET, autotuneTargetTemp);
   
   EEPROM.commit();
   sendPololuSetCurrentLimit(currentLimit);
@@ -766,6 +804,8 @@ void setup(){
   tempPID.SetOutputLimits(0, 3200);  // 0-3200 PWM range for hot wire heater
   tempPID.SetMode(AUTOMATIC);        // Turn on the PID
   tempPID.SetSampleTime(PID_UPDATE_INTERVAL);
+  // Re-apply tunings loaded from EEPROM to ensure runtime values are used
+  tempPID.SetTunings(pidKp, pidKi, pidKd);
   Serial.println("PID configured");
 
   // Skip LVGL and screen building for now to isolate the issue

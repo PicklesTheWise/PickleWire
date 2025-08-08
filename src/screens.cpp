@@ -850,8 +850,8 @@ void buildPIDTuneScreen() {
 
     // PID container for better organization
     lv_obj_t *container = lv_obj_create(scrPIDTune);
-    lv_obj_set_size(container, 300, 180);
-    lv_obj_align(container, LV_ALIGN_CENTER, 0, 10);  // Moved down from -10 to +10
+    lv_obj_set_size(container, 300, 190);  // Slightly taller to fit autotune target row
+    lv_obj_align(container, LV_ALIGN_CENTER, 0, 5);   // Slightly higher to avoid bottom overlap
     lv_obj_set_style_bg_color(container, lv_color_hex(0x2a2a2a), 0);
     lv_obj_set_style_border_color(container, lv_color_hex(0x404040), 0);
     lv_obj_set_style_border_width(container, 1, 0);
@@ -942,6 +942,47 @@ void buildPIDTuneScreen() {
     lv_obj_align(lblPidStatus, LV_ALIGN_TOP_LEFT, 0, 110);
     lv_obj_set_style_text_color(lblPidStatus, lv_color_hex(0x00FF00), 0);
 
+    // Mini chart (right side of container)
+    miniChart = lv_chart_create(container);
+        lv_obj_set_size(miniChart, 80, 80);  // square compact chart per request
+    lv_obj_align(miniChart, LV_ALIGN_TOP_RIGHT, -5, 25);
+    lv_chart_set_type(miniChart, LV_CHART_TYPE_LINE);
+    lv_chart_set_point_count(miniChart, 100);
+    lv_chart_set_range(miniChart, LV_CHART_AXIS_PRIMARY_Y, chartTempMin, chartTempMax);
+    miniSerTemp = lv_chart_add_series(miniChart, lv_palette_main(LV_PALETTE_RED), LV_CHART_AXIS_PRIMARY_Y);
+    miniSerSetpoint = lv_chart_add_series(miniChart, lv_palette_main(LV_PALETTE_GREEN), LV_CHART_AXIS_PRIMARY_Y);
+    lv_chart_set_update_mode(miniChart, LV_CHART_UPDATE_MODE_SHIFT);
+    // Style for clean look
+    lv_obj_set_style_bg_color(miniChart, lv_color_hex(0x111111), 0);
+    lv_obj_set_style_border_width(miniChart, 0, 0);
+    lv_obj_set_style_pad_all(miniChart, 0, 0);
+    lv_obj_set_style_line_width(miniChart, 2, LV_PART_ITEMS);
+    lv_obj_set_style_size(miniChart, 0, LV_PART_INDICATOR);
+
+    // Autotune Target row (label + +/-) below status, left side to avoid chart area
+    lblAutoTarget = lv_label_create(container);
+    char atBuf[32];
+    sprintf(atBuf, "Autotune Target: %.0f°C", autotuneTargetTemp);
+    lv_label_set_text(lblAutoTarget, atBuf);
+    lv_obj_align(lblAutoTarget, LV_ALIGN_TOP_LEFT, 0, 135);
+    lv_obj_set_style_text_color(lblAutoTarget, lv_color_hex(0xCCCCCC), 0);
+
+    lv_obj_t *btnAutoTargetDown = lv_btn_create(container);
+    lv_obj_set_size(btnAutoTargetDown, 25, 20);
+    lv_obj_align(btnAutoTargetDown, LV_ALIGN_TOP_LEFT, 155, 135);
+    lv_obj_set_style_bg_color(btnAutoTargetDown, lv_color_hex(0xFF4444), 0);
+    lv_obj_t *lblATD = lv_label_create(btnAutoTargetDown);
+    lv_label_set_text(lblATD, "-");
+    lv_obj_center(lblATD);
+
+    lv_obj_t *btnAutoTargetUp = lv_btn_create(container);
+    lv_obj_set_size(btnAutoTargetUp, 25, 20);
+    lv_obj_align(btnAutoTargetUp, LV_ALIGN_TOP_LEFT, 185, 135);
+    lv_obj_set_style_bg_color(btnAutoTargetUp, lv_color_hex(0x44FF44), 0);
+    lv_obj_t *lblATU = lv_label_create(btnAutoTargetUp);
+    lv_label_set_text(lblATU, "+");
+    lv_obj_center(lblATU);
+
     // Add event handlers for manual PID adjustments
     lv_obj_add_event_cb(btnPidKpLeft, [](lv_event_t* e) {
         pidKp -= 1.0f;
@@ -1026,8 +1067,8 @@ void buildPIDTuneScreen() {
     
     lv_obj_add_event_cb(btnAutotune, [](lv_event_t* e) {
         if (!autotuneActive) {
-            // Start autotune at 200°C with gentle 40% output for hot wire
-            float targetTemp = 200.0f;  // Fixed target for consistent tuning
+            // Start autotune at selected target temperature with gentle 40% output
+            float targetTemp = autotuneTargetTemp;
             startPIDAutotune(targetTemp, 40.0f);  // Gentle power for gradual ramp
             
             if (lblPidStatus) {
@@ -1038,6 +1079,25 @@ void buildPIDTuneScreen() {
             safeSerialPrintf("PID Autotune started: Target=%.1f°C, Current Limit=%.1f A\n", 
                              targetTemp, currentLimit);
         }
+    }, LV_EVENT_CLICKED, nullptr);
+
+    // Handlers for autotune target +/- buttons
+    lv_obj_add_event_cb(btnAutoTargetDown, [](lv_event_t* e) {
+        autotuneTargetTemp -= 10.0f;
+        if (autotuneTargetTemp < 150.0f) autotuneTargetTemp = 150.0f;
+        char b[32];
+        sprintf(b, "Autotune Target: %.0f°C", autotuneTargetTemp);
+        if (lblAutoTarget) lv_label_set_text(lblAutoTarget, b);
+    scheduleEepromSave();
+    }, LV_EVENT_CLICKED, nullptr);
+
+    lv_obj_add_event_cb(btnAutoTargetUp, [](lv_event_t* e) {
+        autotuneTargetTemp += 10.0f;
+        if (autotuneTargetTemp > 350.0f) autotuneTargetTemp = 350.0f;
+        char b[32];
+        sprintf(b, "Autotune Target: %.0f°C", autotuneTargetTemp);
+        if (lblAutoTarget) lv_label_set_text(lblAutoTarget, b);
+    scheduleEepromSave();
     }, LV_EVENT_CLICKED, nullptr);
 
     // Back button - bottom left
@@ -1098,6 +1158,24 @@ void updatePIDTuneStatus() {
     if (lblSetPidKd) {
         sprintf(buffer, "Kd: %.2f", pidKd);
         lv_label_set_text(lblSetPidKd, buffer);
+    }
+
+    // Update mini chart with live data when on PID tune screen
+    if (lv_scr_act() == scrPIDTune && miniChart && miniSerTemp && miniSerSetpoint) {
+        // Use the same display temp logic as telemetry
+        float temp = getCachedTemp();
+        float displayTemp = (pidEnabled && !isnan(temperatureInput)) ? (float)temperatureInput : temp;
+        lv_chart_set_next_value(miniChart, miniSerTemp, displayTemp);
+        lv_chart_set_next_value(miniChart, miniSerSetpoint, (float)temperatureSetpoint);
+        // Auto-scale global chart range like telemetry so both charts stay consistent
+        if (displayTemp > chartTempMax) {
+            chartTempMax = displayTemp;
+        }
+        if (displayTemp < chartTempMin) {
+            chartTempMin = displayTemp;
+        }
+        // Keep the mini chart range synced with global min/max
+        lv_chart_set_range(miniChart, LV_CHART_AXIS_PRIMARY_Y, chartTempMin, chartTempMax);
     }
 }
 

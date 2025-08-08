@@ -25,6 +25,10 @@ extern lv_obj_t *btnPidTune, *btnSettingsNav;
 extern lv_chart_series_t *serTemp;
 extern lv_chart_series_t *serSetpoint;  // Series for setpoint line
 extern lv_obj_t *chartTemp;
+// Mini chart on PID tune screen
+extern lv_obj_t *miniChart;
+extern lv_chart_series_t *miniSerTemp;
+extern lv_chart_series_t *miniSerSetpoint;
 
 // Shared variables
 extern float wireDiam, tempOffset, currentLimit;
@@ -56,6 +60,8 @@ extern bool autotuneActive;
 extern int autotuneState;
 extern float autotuneKu, autotunePu;
 extern int autotuneNumPeaks;
+extern float autotuneTargetTemp;
+extern lv_obj_t *lblAutoTarget;
 
 // Screensaver and splash screen variables
 #define IDLE_TIMEOUT_MS 60000     // 60 seconds (1 minute) idle timeout
